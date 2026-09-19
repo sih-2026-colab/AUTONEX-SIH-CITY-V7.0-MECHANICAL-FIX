@@ -372,22 +372,34 @@ export default function Experience({
       // the final exact dock snap is imperceptible rather than a sideways jump.
       if (remaining < 1.0 && Math.abs(r.laneOffset) < 0.07) r.laneOffset = 0;
 
-      // ── High Speed Physics (Target 350 km/h top speed) ──────────────────────────
+      // ── Realistic Vehicle Inertia & Momentum Model ────────────────────────────────
       const TOP_SPEED_KMH = 350;
       const TOP_SPEED_MS = TOP_SPEED_KMH / 3.6; // 97.22 m/s
 
-      // Deceleration rate of ~28 m/s^2 allows smooth braking from 350 km/h over ~170m
-      const brakingSpeed = Math.sqrt(Math.max(0, 2 * 28.0 * remaining));
+      // Smooth, natural braking profile over ~220m
+      const smoothDecelDist = Math.max(0, remaining);
+      const brakingSpeed = Math.sqrt(Math.max(0, 2 * 11.5 * smoothDecelDist));
+
       let targetSpeed = Math.min(TOP_SPEED_MS, brakingSpeed);
-      if (turnApproaching && !docking) targetSpeed = Math.min(targetSpeed, 45.0); // ~162 km/h in corners
-      if (r.mode === "FOLLOW" && lead) targetSpeed = Math.min(targetSpeed, Math.max(18.0, lead.speed * 0.95));
-      if (r.mode === "OVERTAKE") targetSpeed = Math.min(TOP_SPEED_MS, Math.max(targetSpeed, 75.0)); // ~270 km/h when passing
-      if (docking) targetSpeed = Math.min(targetSpeed, 18.0);
-      if (finalAlign) targetSpeed = Math.min(targetSpeed, 6.0);
+      if (turnApproaching && !docking) targetSpeed = Math.min(targetSpeed, 32.0); // ~115 km/h natural cornering speed
+      if (r.mode === "FOLLOW" && lead) targetSpeed = Math.min(targetSpeed, Math.max(14.0, lead.speed * 0.90));
+      if (r.mode === "OVERTAKE") targetSpeed = Math.min(TOP_SPEED_MS, Math.max(targetSpeed, 55.0)); // ~198 km/h passing ramp
+      if (docking) targetSpeed = Math.min(targetSpeed, 12.0);
+      if (finalAlign) targetSpeed = Math.min(targetSpeed, 3.5);
       if (remaining < 0.34) targetSpeed = 0;
 
-      // High-performance acceleration & deceleration rates
-      const accel = targetSpeed > r.speed ? 24.0 : 32.0;
+      // Realistic Inertia: Acceleration tapers gracefully with speed (modeling engine torque & aero drag)
+      const speedRatio = Math.min(1, r.speed / TOP_SPEED_MS);
+      let accel;
+      if (targetSpeed > r.speed) {
+        // Torque curve: smooth initial pickup (4.5), strong mid-range (5.8), aero taper at high speed (1.8)
+        const aeroPowerFactor = 1.0 - speedRatio * speedRatio * 0.65;
+        accel = Math.max(1.8, 5.8 * aeroPowerFactor);
+      } else {
+        // Natural progressive braking without abrupt step drops
+        accel = r.speed > 25 ? 7.5 : 4.2;
+      }
+
       r.speed = THREE.MathUtils.damp(r.speed, targetSpeed, accel, delta);
       r.distance = Math.min(r.total, r.distance + r.speed * delta);
       if (r.total - r.distance < 0.02) {
@@ -403,11 +415,11 @@ export default function Experience({
         r.laneOffset
       );
       car.position.copy(position);
-      car.position.y = 0.34 + Math.sin(state.clock.elapsedTime * 14) * 0.003;
+      car.position.y = 0.34 + Math.sin(state.clock.elapsedTime * 12) * 0.0025;
 
       const desiredYaw = Math.atan2(-motionTangent.x, -motionTangent.z);
       const yawBefore = car.rotation.y;
-      car.rotation.y = dampAngle(car.rotation.y, desiredYaw, 14.0, delta);
+      car.rotation.y = dampAngle(car.rotation.y, desiredYaw, 10.0, delta);
       const yawError = Math.atan2(Math.sin(desiredYaw - yawBefore), Math.cos(desiredYaw - yawBefore));
 
       // ── Steering Calculation ───────────────────────────────────────────────────
