@@ -15,7 +15,7 @@ import {
   vecForNode,
   LANE_OFFSET
 } from "./scene/roadNetwork";
-import { getTrafficActors } from "./scene/trafficState";
+import { getTrafficActors, updateHeroActor } from "./scene/trafficState";
 
 const HOME = vecForNode(HOME_NODE);
 const HOME_LANE = HOME.clone().add(new THREE.Vector3(-LANE_OFFSET, 0, 0));
@@ -166,6 +166,9 @@ export default function Experience({
     if (!carRef.current || !cameraRig.current) return;
     const car = carRef.current;
 
+    // Broadcast hero car position to traffic system for dual-sided collision avoidance
+    updateHeroActor({ position: car.position, speed: car.userData?.speed ?? 0 });
+
     if (phase === "loading") return;
 
     if (phase === "intro") {
@@ -177,7 +180,7 @@ export default function Experience({
       const startZ = 216;
       const endZ = HOME_LANE.z;
       car.position.set(-LANE_OFFSET, 0.34, THREE.MathUtils.lerp(startZ, endZ, p));
-      car.userData.speed = 45;
+      car.userData.speed = p * 25;
       car.userData.steer = 0;
 
       const introPct = Math.round(p * 100);
@@ -186,31 +189,23 @@ export default function Experience({
         onIntroProgress?.(p);
       }
 
-      if (t < 1.0) {
-        cameraRig.current.position.lerp(new THREE.Vector3(4.6, 1.28, car.position.z - 13.2), 1 - Math.pow(0.008, delta));
-        camera.position.copy(cameraRig.current.position);
-        camera.lookAt(car.position.x + 0.1, car.position.y + 0.62, car.position.z - 2.5);
-        dampFov(camera, 36, delta);
-      } else if (t < 2.1) {
-        cameraRig.current.position.lerp(new THREE.Vector3(-5.4, 1.62, car.position.z + 4.2), 1 - Math.pow(0.008, delta));
-        camera.position.copy(cameraRig.current.position);
-        camera.lookAt(car.position.x - 0.2, car.position.y + 0.98, car.position.z - 3.1);
-        dampFov(camera, 42, delta);
-      } else {
-        const entrySplit = 2.65;
-        const windshieldTarget = carLocalToWorld(car, windshieldEntryLocal(car));
-        const driverEye = carLocalToWorld(car, driverEyeLocal(car));
-        const driverLook = carLocalToWorld(car, driverLookLocal(car));
+      // ── SINGLE CONTINUOUS FLUID INTRO FLIGHT ─────────────────────────────────────
+      // One smooth, unbroken 3D camera trajectory from exterior front-left directly
+      // into the driver cockpit seat — ZERO jump cuts, ZERO repeated seat views!
+      const startExteriorCam = carLocalToWorld(car, new THREE.Vector3(-2.2, 1.45, 5.5));
+      const startExteriorLook = carLocalToWorld(car, new THREE.Vector3(-0.35, 0.90, -1.8));
+      const endCockpitCam = carLocalToWorld(car, driverEyeLocal(car));
+      const endCockpitLook = carLocalToWorld(car, driverLookLocal(car));
 
-        if (t < entrySplit) {
-          cameraRig.current.position.lerp(windshieldTarget, 1 - Math.pow(0.005, delta));
-        } else {
-          cameraRig.current.position.lerp(driverEye, 1 - Math.pow(0.001, delta));
-        }
-        camera.position.copy(cameraRig.current.position);
-        camera.lookAt(driverLook);
-        dampFov(camera, t < entrySplit ? 58 : 74, delta);
-      }
+      // Ease-in-out flight progress
+      const flightP = p * p * (3 - 2 * p);
+      const currentCamPos = new THREE.Vector3().lerpVectors(startExteriorCam, endCockpitCam, flightP);
+      const currentLookPos = new THREE.Vector3().lerpVectors(startExteriorLook, endCockpitLook, flightP);
+
+      cameraRig.current.position.copy(currentCamPos);
+      camera.position.copy(currentCamPos);
+      camera.lookAt(currentLookPos);
+      dampFov(camera, THREE.MathUtils.lerp(48, 74, flightP), delta);
 
       if (t >= INTRO_DURATION && !introCompleted.current) {
         introCompleted.current = true;

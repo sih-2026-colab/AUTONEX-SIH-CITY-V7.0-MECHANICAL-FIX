@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { CITY_ROWS, ROAD_WIDTH, LANE_OFFSET } from "./roadNetwork";
-import { removeTrafficActor, updateTrafficActor } from "./trafficState";
+import { getHeroActor, removeTrafficActor, updateTrafficActor } from "./trafficState";
 
 const FLOOR_H = 2.55;
 const SIGN_RED = "#ff142d";
@@ -442,7 +442,28 @@ function TrafficCar({ id, x, startZ, direction = -1, speed = 10, color = "#38424
 
   useFrame((state, delta) => {
     if (!ref.current) return;
-    ref.current.position.z += direction * speed * delta;
+
+    // Traffic Collision Avoidance: Check distance to hero vehicle
+    const hero = getHeroActor();
+    let currentSpeed = speed;
+
+    if (hero && hero.position) {
+      const heroPos = hero.position;
+      const dx = Math.abs(ref.current.position.x - heroPos.x);
+      // dz is positive if hero is ahead of traffic car along travel direction
+      const dz = (heroPos.z - ref.current.position.z) * direction;
+
+      if (dx < 2.2 && dz > -2.0 && dz < 16.0) {
+        const safeGap = 7.0;
+        if (dz < safeGap) {
+          currentSpeed = 0; // Immediate full stop to prevent hitting hero car
+        } else {
+          currentSpeed = Math.min(speed, hero.speed * (dz / 16.0));
+        }
+      }
+    }
+
+    ref.current.position.z += direction * currentSpeed * delta;
     const minZ = -350;
     const maxZ = 178;
     if (direction < 0 && ref.current.position.z < minZ) ref.current.position.z = maxZ + offset;
@@ -451,8 +472,8 @@ function TrafficCar({ id, x, startZ, direction = -1, speed = 10, color = "#38424
     if (id) {
       updateTrafficActor(id, {
         position: ref.current.position,
-        velocity: new THREE.Vector3(0, 0, direction * speed),
-        speed
+        velocity: new THREE.Vector3(0, 0, direction * currentSpeed),
+        speed: currentSpeed
       });
     }
   });
