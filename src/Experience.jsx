@@ -1,0 +1,561 @@
+import { useEffect, useMemo, useRef } from "react";
+import { useFrame, useThree } from "@react-three/fiber";
+import * as THREE from "three";
+import HeroCar from "./scene/HeroCar";
+import World from "./scene/World";
+import { DESTINATIONS } from "./data";
+import {
+  DESTINATION_NODE,
+  HOME_NODE,
+  buildPolylineMetrics,
+  makeRoadLockedWaypoints,
+  nearestRoadNode,
+  pointAlongPolyline,
+  shortestNodePath,
+  vecForNode,
+  LANE_OFFSET
+} from "./scene/roadNetwork";
+import { getTrafficActors } from "./scene/trafficState";
+
+const HOME = vecForNode(HOME_NODE);
+const HOME_LANE = HOME.clone().add(new THREE.Vector3(-LANE_OFFSET, 0, 0));
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
+const INTRO_DURATION = 8.6;
+
+// Cockpit points are vehicle-local coordinates. The imported GT500's steering
+// assembly sits on local -X after the model is recentered/rotated in HeroCar.
+// Keeping these local and transforming them through the car yaw prevents the
+// camera from ending beside the car when the ego vehicle is in an offset lane.
+// Fixed driver-eye camera. Once the cockpit is reached, this point never
+// slides forward/back relative to the vehicle; it is rigidly attached to the car.
+// Slightly above the dashboard gives a natural road view while keeping steering
+// wheel/dashboard edges visible.
+// Tuned from user screenshots: true driver-eye view should sit beside the steering
+// wheel, slightly behind the windshield, not at the rear seat / outside the car.
+// Clearer driver-eye view: move closer to the windshield and slightly lower/centered
+// so the road is visible, while keeping a small amount of dashboard in frame.
+// True cockpit = driver-seat position, not outside or on the hood.
+// Move the camera back into the cabin beside the steering wheel.
+const DRIVER_EYE_LOCAL = new THREE.Vector3(-0.42, 0.96, 0.16);
+const DRIVER_LOOK_LOCAL = new THREE.Vector3(-0.44, 0.92, -15.5);
+const WINDSHIELD_ENTRY_LOCAL = new THREE.Vector3(-0.40, 1.00, -0.26);
+
+function carLocalToWorld(car, local) {
+  return car.position.clone().add(local.clone().applyAxisAngle(Y_AXIS, car.rotation.y));
+}
+
+function driverEyeLocal(car) {
+  return car.userData?.driverEyeLocal ?? DRIVER_EYE_LOCAL;
+}
+
+function driverLookLocal(car) {
+  return car.userData?.driverLookLocal ?? DRIVER_LOOK_LOCAL;
+}
+
+function windshieldEntryLocal(car) {
+  return car.userData?.windshieldEntryLocal ?? WINDSHIELD_ENTRY_LOCAL;
+}
+
+function smooth01(t) {
+  const v = THREE.MathUtils.clamp(t, 0, 1);
+  return v * v * (3 - 2 * v);
+}
+
+function dampAngle(current, target, lambda, delta) {
+  const diff = Math.atan2(Math.sin(target - current), Math.cos(target - current));
+  return current + diff * (1 - Math.exp(-lambda * delta));
+}
+
+function dampFov(camera, target, delta) {
+  const next = THREE.MathUtils.damp(camera.fov, target, 5, delta);
+  if (Math.abs(next - camera.fov) > 0.001) {
+    camera.fov = next;
+    camera.updateProjectionMatrix();
+  }
+}
+
+export default function Experience({
+  phase,
+  engineOn,
+  target,
+  arrivedAt,
+  onArrival,
+  onDriveProgress,
+  onSpeedChange,
+  onDriveStatus,
+  doorOpen,
+  onSceneReady,
+  onIntroProgress,
+  onIntroComplete,
+  cameraMode = "cockpit"
+}) {
+  const carRef = useRef();
+  const cameraRig = useRef();
+  const introTime = useRef(0);
+  const lastReportedSpeed = useRef(-1);
+  const lastIntroPercent = useRef(-1);
+  const introCompleted = useRef(false);
+  const { camera } = useThree();
+
+
+
+  useEffect(() => {
+    camera.near = 0.03;
+    camera.far = 700;
+    camera.updateProjectionMatrix();
+  }, [camera]);
+  const route = useRef({
+    active: false,
+    points: [HOME.clone()],
+    cumulative: [0],
+    total: 0,
+    distance: 0,
+    speed: 0,
+    targetId: null,
+    laneOffset: LANE_OFFSET,
+    desiredLaneOffset: LANE_OFFSET,
+    mode: "CRUISE",
+    overtakeActorId: null,
+    dockPoint: HOME.clone()
+  });
+
+  const destinations = useMemo(() => DESTINATIONS, []);
+
+  useEffect(() => {
+    if (!carRef.current || !cameraRig.current) return;
+    const car = carRef.current;
+
+    if (phase === "intro") {
+      introTime.current = 0;
+      introCompleted.current = false;
+      lastIntroPercent.current = -1;
+      onIntroProgress?.(0);
+      route.current.active = false;
+      car.position.set(-LANE_OFFSET, 0.34, 216);
+      car.rotation.set(0, 0, 0);
+      car.userData.speed = 9;
+      car.userData.steer = 0;
+      cameraRig.current.position.set(4.8, 1.55, 203);
+      camera.position.copy(cameraRig.current.position);
+      camera.fov = 39;
+      camera.updateProjectionMatrix();
+    }
+
+    if (phase === "cockpit" || phase === "boot") {
+      car.position.copy(HOME_LANE);
+      car.rotation.set(0, 0, 0);
+      car.userData.speed = 0;
+      car.userData.steer = 0;
+      route.current.active = false;
+    }
+  }, [phase, camera]);
+
+  useEffect(() => {
+    if (!target || !carRef.current || arrivedAt) return;
+
+    const startNode = nearestRoadNode(carRef.current.position);
+    const destNode = DESTINATION_NODE[target.id];
+    const nodePath = shortestNodePath(startNode, destNode);
+    const points = makeRoadLockedWaypoints(nodePath, carRef.current.position);
+    const { cumulative, total } = buildPolylineMetrics(points);
+
+    route.current.active = true;
+    route.current.points = points;
+    route.current.cumulative = cumulative;
+    route.current.total = total;
+    route.current.distance = 0;
+    route.current.speed = 0;
+    route.current.targetId = target.id;
+    route.current.laneOffset = LANE_OFFSET;
+    route.current.desiredLaneOffset = LANE_OFFSET;
+    route.current.mode = "CRUISE";
+    route.current.overtakeActorId = null;
+    route.current.dockPoint = vecForNode(destNode);
+
+    onDriveProgress?.(0);
+    onSpeedChange?.(0);
+  }, [target, arrivedAt, onDriveProgress, onSpeedChange]);
+
+  useFrame((state, delta) => {
+    if (!carRef.current || !cameraRig.current) return;
+    const car = carRef.current;
+
+    if (phase === "loading") return;
+
+    if (phase === "intro") {
+      // Clamp the cinematic clock so a temporary FPS drop cannot skip camera shots.
+      const introDelta = Math.min(delta, 0.05);
+      introTime.current = Math.min(INTRO_DURATION, introTime.current + introDelta);
+      const t = introTime.current;
+      const p = smooth01(t / INTRO_DURATION);
+
+      const startZ = 216;
+      const endZ = HOME_LANE.z;
+      car.position.set(-LANE_OFFSET, 0.34, THREE.MathUtils.lerp(startZ, endZ, p));
+      car.userData.speed = 18;
+      car.userData.steer = 0;
+
+      const introPct = Math.round(p * 100);
+      if (introPct !== lastIntroPercent.current) {
+        lastIntroPercent.current = introPct;
+        onIntroProgress?.(p);
+      }
+
+      if (t < 2.6) {
+        cameraRig.current.position.lerp(new THREE.Vector3(4.6, 1.28, car.position.z - 13.2), 1 - Math.pow(0.02, delta));
+        camera.position.copy(cameraRig.current.position);
+        camera.lookAt(car.position.x + 0.1, car.position.y + 0.62, car.position.z - 2.5);
+        dampFov(camera, 34, delta);
+      } else if (t < 5.4) {
+        cameraRig.current.position.lerp(new THREE.Vector3(-6.4, 1.72, car.position.z + 4.8), 1 - Math.pow(0.02, delta));
+        camera.position.copy(cameraRig.current.position);
+        camera.lookAt(car.position.x - 0.2, car.position.y + 0.98, car.position.z - 3.1);
+        dampFov(camera, 40, delta);
+      } else {
+        // Two-stage entry: approach the driver's side of the windshield, then
+        // cross it into the real cockpit eye point. All points are car-local.
+        const entrySplit = 7.0;
+        const windshieldTarget = carLocalToWorld(car, windshieldEntryLocal(car));
+        const driverEye = carLocalToWorld(car, driverEyeLocal(car));
+        const driverLook = carLocalToWorld(car, driverLookLocal(car));
+
+        if (t < entrySplit) {
+          cameraRig.current.position.lerp(windshieldTarget, 1 - Math.pow(0.018, delta));
+        } else {
+          cameraRig.current.position.lerp(driverEye, 1 - Math.pow(0.004, delta));
+        }
+        camera.position.copy(cameraRig.current.position);
+        camera.lookAt(driverLook);
+        dampFov(camera, t < entrySplit ? 54 : 74, delta);
+      }
+
+      if (t >= INTRO_DURATION && !introCompleted.current) {
+        introCompleted.current = true;
+        onIntroProgress?.(1);
+        onIntroComplete?.();
+      }
+      return;
+    }
+
+    if (phase === "cockpit" || phase === "boot") {
+      // Hold the camera physically inside the GT500 cabin. This used to use
+      // absolute world X coordinates, which placed the camera beside the car
+      // whenever the vehicle occupied the lane offset.
+      const targetCam = carLocalToWorld(car, driverEyeLocal(car));
+      const targetLook = carLocalToWorld(car, driverLookLocal(car));
+      // No follow smoothing here: smoothing causes the driver's eye to lag behind
+      // the car during acceleration/turning and looks like the camera moves back
+      // and forth inside the cabin. Lock it directly to the driver-eye point.
+      cameraRig.current.position.copy(targetCam);
+      camera.position.copy(targetCam);
+      camera.lookAt(targetLook);
+      dampFov(camera, 74, delta);
+      return;
+    }
+
+    if (route.current.active) {
+      const r = route.current;
+      const remaining = Math.max(0, r.total - r.distance);
+      const nowSample = pointAlongPolyline(r.points, r.cumulative, r.distance, r.laneOffset);
+      const futureSample = pointAlongPolyline(
+        r.points,
+        r.cumulative,
+        Math.min(r.total, r.distance + 20),
+        r.laneOffset
+      );
+
+      const tangent = nowSample.tangent;
+      const futureTangent = futureSample.tangent;
+      const turnDot = THREE.MathUtils.clamp(tangent.dot(futureTangent), -1, 1);
+      const turnAngle = Math.acos(turnDot);
+      const signedTurn = Math.atan2(
+        tangent.z * futureTangent.x - tangent.x * futureTangent.z,
+        turnDot
+      );
+      const turnApproaching = turnAngle > 0.12 && remaining > 4;
+
+      const normal = new THREE.Vector3(tangent.z, 0, -tangent.x).normalize();
+      const actors = getTrafficActors();
+      let lead = null;
+      let leadDistance = Infinity;
+
+      for (const actor of actors) {
+        const rel = actor.position.clone().sub(car.position);
+        const longitudinal = rel.dot(tangent);
+        const lateral = Math.abs(rel.dot(normal));
+        const actorDir = actor.velocity.lengthSq() > 0.01 ? actor.velocity.clone().normalize() : tangent;
+        if (longitudinal > 0 && longitudinal < 48 && lateral < 1.75 && actorDir.dot(tangent) > 0.55) {
+          if (longitudinal < leadDistance) {
+            leadDistance = longitudinal;
+            lead = actor;
+          }
+        }
+      }
+
+      const passingOffset = -LANE_OFFSET;
+      const laneDelta = passingOffset - r.laneOffset;
+      const passingLaneCenter = car.position.clone().add(normal.clone().multiplyScalar(laneDelta));
+      let passingClear = true;
+      for (const actor of actors) {
+        if (lead && actor.id === lead.id) continue;
+        const rel = actor.position.clone().sub(passingLaneCenter);
+        const longitudinal = rel.dot(tangent);
+        const lateral = Math.abs(rel.dot(normal));
+        if (Math.abs(longitudinal) < 22 && lateral < 1.65) {
+          passingClear = false;
+          break;
+        }
+      }
+
+      let command = "CRUISE";
+      let decision = "ROAD CLEAR";
+      let signal = null;
+
+      if (r.mode === "OVERTAKE") {
+        const passedActor = actors.find((a) => a.id === r.overtakeActorId);
+        const relative = passedActor ? passedActor.position.clone().sub(car.position).dot(tangent) : -20;
+        r.desiredLaneOffset = passingOffset;
+        const overtakeDelta = passingOffset - r.laneOffset;
+        // Signal only while the lane change is actually happening. For this road
+        // coordinate convention, positive laneOffset is vehicle-left and negative
+        // laneOffset is vehicle-right. Overtaking moves from +offset to -offset.
+        signal = Math.abs(overtakeDelta) > 0.14
+          ? (overtakeDelta < 0 ? "RIGHT" : "LEFT")
+          : null;
+        command = "OVERTAKE";
+        decision = "PASSING LANE CLEAR";
+        if (relative < -8 || turnApproaching) {
+          r.mode = "RETURN";
+          r.desiredLaneOffset = LANE_OFFSET;
+        }
+      } else if (r.mode === "RETURN") {
+        r.desiredLaneOffset = LANE_OFFSET;
+        const returnDelta = LANE_OFFSET - r.laneOffset;
+        // Returning from the passing lane increases laneOffset, which is a
+        // physical LEFT lane change for this road coordinate convention.
+        signal = Math.abs(returnDelta) > 0.14
+          ? (returnDelta < 0 ? "RIGHT" : "LEFT")
+          : null;
+        command = "RETURN LANE";
+        decision = "SAFE GAP CONFIRMED";
+        if (Math.abs(r.laneOffset - LANE_OFFSET) < 0.12) {
+          r.mode = "CRUISE";
+          r.overtakeActorId = null;
+        }
+      } else if (lead && leadDistance < 30) {
+        if (passingClear && !turnApproaching && remaining > 34) {
+          r.mode = "OVERTAKE";
+          r.overtakeActorId = lead.id;
+          r.desiredLaneOffset = passingOffset;
+          signal = passingOffset < r.laneOffset ? "RIGHT" : "LEFT";
+          command = "OVERTAKE";
+          decision = "FRONT VEHICLE + PASSING LANE CLEAR";
+        } else {
+          r.mode = "FOLLOW";
+          r.desiredLaneOffset = LANE_OFFSET;
+          command = "WAIT";
+          decision = passingClear ? "TURN AHEAD — HOLD POSITION" : "PASSING LANE OCCUPIED";
+        }
+      } else if (r.mode === "FOLLOW") {
+        r.mode = "CRUISE";
+        r.desiredLaneOffset = LANE_OFFSET;
+      }
+
+      if (turnApproaching && r.mode !== "OVERTAKE") {
+        signal = signedTurn > 0 ? "LEFT" : "RIGHT";
+        command = "TURN";
+        decision = "SLOWING FOR INTERSECTION";
+      }
+
+      // Destination docking: leave the traffic lane gradually and align exactly
+      // with the center of the red parking bay before any destination action is enabled.
+      const docking = remaining < 14.0;
+      const finalAlign = remaining < 7.0;
+      if (docking) {
+        r.mode = "DOCK";
+        r.desiredLaneOffset = 0;
+        signal = null;
+        command = "DOCK";
+        decision = finalAlign ? "CENTERING IN RED PARKING BAY" : "ALIGNING WITH DESTINATION BAY";
+      }
+
+      r.laneOffset = THREE.MathUtils.damp(
+        r.laneOffset,
+        r.desiredLaneOffset,
+        docking ? (finalAlign ? 6.4 : 3.8) : 2.1,
+        delta
+      );
+      // By the last metre the vehicle should already be visually centered, so
+      // the final exact dock snap is imperceptible rather than a sideways jump.
+      if (remaining < 1.0 && Math.abs(r.laneOffset) < 0.07) r.laneOffset = 0;
+
+      // Real braking profile + low-speed final docking.
+      const brakingSpeed = Math.sqrt(Math.max(0, 2 * 4.8 * remaining));
+      let targetSpeed = Math.min(18.5, brakingSpeed);
+      if (turnApproaching && !docking) targetSpeed = Math.min(targetSpeed, 7.0);
+      if (r.mode === "FOLLOW" && lead) targetSpeed = Math.min(targetSpeed, Math.max(3.0, lead.speed * 0.82));
+      if (r.mode === "OVERTAKE") targetSpeed = Math.min(17.0, Math.max(targetSpeed, 11.5));
+      if (docking) targetSpeed = Math.min(targetSpeed, 4.2);
+      if (finalAlign) targetSpeed = Math.min(targetSpeed, 2.2);
+      if (remaining < 0.34) targetSpeed = 0;
+
+      // Final docking is intentionally two-stage: creep to the exact red-bay
+      // centre first, then settle the physical speed to zero before enabling arrival.
+      const accel = targetSpeed > r.speed ? 3.8 : 7.2;
+      r.speed = THREE.MathUtils.damp(r.speed, targetSpeed, accel, delta);
+      r.distance = Math.min(r.total, r.distance + r.speed * delta);
+      if (r.total - r.distance < 0.02) {
+        r.distance = r.total;
+        r.laneOffset = 0;
+        r.desiredLaneOffset = 0;
+      }
+
+      const { position, tangent: motionTangent } = pointAlongPolyline(
+        r.points,
+        r.cumulative,
+        r.distance,
+        r.laneOffset
+      );
+      car.position.copy(position);
+      car.position.y = 0.34 + Math.sin(state.clock.elapsedTime * 10) * 0.0025;
+
+      const desiredYaw = Math.atan2(-motionTangent.x, -motionTangent.z);
+      const yawBefore = car.rotation.y;
+      car.rotation.y = dampAngle(car.rotation.y, desiredYaw, 7.2, delta);
+      const yawError = Math.atan2(Math.sin(desiredYaw - yawBefore), Math.cos(desiredYaw - yawBefore));
+      car.userData.speed = r.speed;
+      car.userData.steer = THREE.MathUtils.clamp(yawError * 2.4, -1, 1);
+      car.userData.signal = signal;
+
+      const progress = r.total > 0 ? r.distance / r.total : 1;
+      onDriveProgress?.(progress);
+
+      const kmh = Math.round(r.speed * 3.6);
+      if (kmh !== lastReportedSpeed.current) {
+        lastReportedSpeed.current = kmh;
+        onSpeedChange?.(kmh);
+      }
+
+      const closingSpeed = lead ? Math.max(0, r.speed - lead.speed) : 0;
+      const ttc = lead && closingSpeed > 0.25 ? leadDistance / closingSpeed : null;
+
+      if (state.clock.elapsedTime % 0.2 < delta) {
+        onDriveStatus?.({
+          command,
+          decision,
+          signal,
+          frontDistance: Number.isFinite(leadDistance) ? Math.round(leadDistance) : null,
+          passingClear,
+          turnAhead: turnApproaching,
+          ttc: ttc != null ? Number(ttc.toFixed(1)) : null
+        });
+      }
+
+      // Arrival is gated by BOTH exact bay-centre position and near-zero speed.
+      // Reaching 100% route progress alone is not enough to open the destination.
+      const atDockCenter = r.distance >= r.total - 0.006 && Math.abs(r.laneOffset) < 0.03;
+      if (atDockCenter) {
+        const final = pointAlongPolyline(r.points, r.cumulative, r.total, 0);
+        car.position.copy(r.dockPoint ?? final.position);
+        car.position.y = 0.34;
+        const finalYaw = Math.atan2(-final.tangent.x, -final.tangent.z);
+        car.rotation.y = finalYaw;
+        r.laneOffset = 0;
+        r.desiredLaneOffset = 0;
+        r.distance = r.total;
+
+        // While the Mustang settles, keep the HUD in DOCK state. Only after the
+        // speed is effectively zero do we commit PARK and call onArrival().
+        if (r.speed >= 0.12) {
+          onDriveProgress?.(0.999);
+          onDriveStatus?.({
+            command: "DOCK",
+            decision: "FINAL STOP IN RED PARKING BAY",
+            signal: null,
+            frontDistance: null,
+            passingClear: true,
+            turnAhead: false,
+            ttc: null
+          });
+        } else {
+          r.speed = 0;
+          r.active = false;
+          car.userData.speed = 0;
+          car.userData.steer = 0;
+          car.userData.signal = null;
+          onDriveProgress?.(1);
+          onSpeedChange?.(0);
+          onDriveStatus?.({
+            command: "PARK",
+            decision: "CENTERED IN RED PARKING BAY",
+            signal: null,
+            frontDistance: null,
+            passingClear: true,
+            turnAhead: false,
+            ttc: null
+          });
+          onArrival(r.targetId);
+        }
+      }
+    } else {
+      car.userData.speed = 0;
+      car.userData.steer = 0;
+      car.userData.signal = null;
+    }
+
+    let desiredCamera;
+    let lookTarget;
+
+    if (cameraMode === "top") {
+      // "TOP VIEW" means the earlier third-person car + road view, not a vertical
+      // bird's-eye view. If switching from the cockpit, jump just outside the car
+      // first so the transition never travels through the roof/body geometry.
+      const chaseOffset = new THREE.Vector3(0.9, 4.25, 11.8).applyAxisAngle(Y_AXIS, car.rotation.y);
+      if (cameraRig.current.position.distanceTo(car.position) < 3.0) {
+        const safeExteriorOffset = new THREE.Vector3(0.7, 3.0, 7.2).applyAxisAngle(Y_AXIS, car.rotation.y);
+        cameraRig.current.position.copy(car.position.clone().add(safeExteriorOffset));
+      }
+      desiredCamera = car.position.clone().add(chaseOffset);
+      const chaseLookAhead = new THREE.Vector3(0, 0.90, -9.5).applyAxisAngle(Y_AXIS, car.rotation.y);
+      lookTarget = car.position.clone().add(chaseLookAhead);
+      dampFov(camera, 49, delta);
+
+      // Smoothing is useful only for the optional exterior view.
+      cameraRig.current.position.lerp(desiredCamera, 1 - Math.pow(0.012, delta));
+      camera.position.copy(cameraRig.current.position);
+      camera.lookAt(lookTarget);
+    } else {
+      // DEFAULT: rigid driver-eye view. No chase, orbit, zoom-in/out or fore/aft
+      // drift while driving. The camera rotates only because the vehicle turns.
+      desiredCamera = carLocalToWorld(car, driverEyeLocal(car));
+      lookTarget = carLocalToWorld(car, driverLookLocal(car));
+      cameraRig.current.position.copy(desiredCamera);
+      camera.position.copy(desiredCamera);
+      camera.lookAt(lookTarget);
+      dampFov(camera, 74, delta);
+    }
+  });
+
+  return (
+    <>
+      <color attach="background" args={["#8aa3c4"]} />
+      <fog attach="fog" args={["#d7c0a8", 120, 450]} />
+
+      <ambientLight intensity={0.8} color="#fff5eb" />
+      <hemisphereLight args={["#b9def0", "#d4b497", 1.25]} />
+      <directionalLight
+        castShadow={false}
+        position={[-48, 46, 52]}
+        intensity={2.6}
+        color="#ffd09a"
+      />
+      <directionalLight position={[38, 16, -80]} intensity={0.42} color="#ff9d58" />
+      <pointLight position={[0, 24, 146]} color="#ffb36a" intensity={4.5} distance={60} />
+      <pointLight position={[-72, 18, -140]} color="#ff1730" intensity={5.2} distance={36} />
+
+      <group ref={cameraRig} />
+      <World destinations={destinations} dawn />
+      <HeroCar ref={carRef} engineOn={engineOn} doorOpen={doorOpen} headlights onReady={onSceneReady} />
+    </>
+  );
+}
