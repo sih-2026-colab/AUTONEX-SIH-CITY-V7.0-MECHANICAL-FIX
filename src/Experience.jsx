@@ -372,7 +372,7 @@ export default function Experience({
       // the final exact dock snap is imperceptible rather than a sideways jump.
       if (remaining < 1.0 && Math.abs(r.laneOffset) < 0.07) r.laneOffset = 0;
 
-      // ── Realistic Vehicle Inertia & Momentum Model ────────────────────────────────
+      // ── Realistic Vehicle Inertia & Standstill Launch Model ──────────────────────
       const TOP_SPEED_KMH = 350;
       const TOP_SPEED_MS = TOP_SPEED_KMH / 3.6; // 97.22 m/s
 
@@ -388,13 +388,19 @@ export default function Experience({
       if (finalAlign) targetSpeed = Math.min(targetSpeed, 3.5);
       if (remaining < 0.34) targetSpeed = 0;
 
-      // Realistic Inertia: Acceleration tapers gracefully with speed (modeling engine torque & aero drag)
+      // True 0 km/h Standstill Launch: progressive ramp off the line prevents instant jump
       const speedRatio = Math.min(1, r.speed / TOP_SPEED_MS);
       let accel;
       if (targetSpeed > r.speed) {
-        // Torque curve: smooth initial pickup (4.5), strong mid-range (5.8), aero taper at high speed (1.8)
-        const aeroPowerFactor = 1.0 - speedRatio * speedRatio * 0.65;
-        accel = Math.max(1.8, 5.8 * aeroPowerFactor);
+        if (r.speed < 8.0) {
+          // Smooth standing launch: gradual 0 -> 30 km/h rollout
+          const launchFactor = Math.max(0.12, r.speed / 8.0);
+          accel = 2.4 * launchFactor + 1.2;
+        } else {
+          // Mid & High speed torque curve: strong pull tapering near 350 km/h
+          const aeroPowerFactor = 1.0 - speedRatio * speedRatio * 0.65;
+          accel = Math.max(1.8, 5.5 * aeroPowerFactor);
+        }
       } else {
         // Natural progressive braking without abrupt step drops
         accel = r.speed > 25 ? 7.5 : 4.2;
