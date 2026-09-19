@@ -20,22 +20,10 @@ import { getTrafficActors } from "./scene/trafficState";
 const HOME = vecForNode(HOME_NODE);
 const HOME_LANE = HOME.clone().add(new THREE.Vector3(-LANE_OFFSET, 0, 0));
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
-const INTRO_DURATION = 8.6;
+const INTRO_DURATION = 3.2;
 
 // Cockpit points are vehicle-local coordinates. The imported GT500's steering
 // assembly sits on local -X after the model is recentered/rotated in HeroCar.
-// Keeping these local and transforming them through the car yaw prevents the
-// camera from ending beside the car when the ego vehicle is in an offset lane.
-// Fixed driver-eye camera. Once the cockpit is reached, this point never
-// slides forward/back relative to the vehicle; it is rigidly attached to the car.
-// Slightly above the dashboard gives a natural road view while keeping steering
-// wheel/dashboard edges visible.
-// Tuned from user screenshots: true driver-eye view should sit beside the steering
-// wheel, slightly behind the windshield, not at the rear seat / outside the car.
-// Clearer driver-eye view: move closer to the windshield and slightly lower/centered
-// so the road is visible, while keeping a small amount of dashboard in frame.
-// True cockpit = driver-seat position, not outside or on the hood.
-// Move the camera back into the cabin beside the steering wheel.
 const DRIVER_EYE_LOCAL = new THREE.Vector3(-0.42, 0.96, 0.16);
 const DRIVER_LOOK_LOCAL = new THREE.Vector3(-0.44, 0.92, -15.5);
 const WINDSHIELD_ENTRY_LOCAL = new THREE.Vector3(-0.40, 1.00, -0.26);
@@ -67,7 +55,7 @@ function dampAngle(current, target, lambda, delta) {
 }
 
 function dampFov(camera, target, delta) {
-  const next = THREE.MathUtils.damp(camera.fov, target, 5, delta);
+  const next = THREE.MathUtils.damp(camera.fov, target, 8, delta);
   if (Math.abs(next - camera.fov) > 0.001) {
     camera.fov = next;
     camera.updateProjectionMatrix();
@@ -96,8 +84,6 @@ export default function Experience({
   const lastIntroPercent = useRef(-1);
   const introCompleted = useRef(false);
   const { camera } = useThree();
-
-
 
   useEffect(() => {
     camera.near = 0.03;
@@ -133,7 +119,7 @@ export default function Experience({
       route.current.active = false;
       car.position.set(-LANE_OFFSET, 0.34, 216);
       car.rotation.set(0, 0, 0);
-      car.userData.speed = 9;
+      car.userData.speed = 35;
       car.userData.steer = 0;
       cameraRig.current.position.set(4.8, 1.55, 203);
       camera.position.copy(cameraRig.current.position);
@@ -183,7 +169,6 @@ export default function Experience({
     if (phase === "loading") return;
 
     if (phase === "intro") {
-      // Clamp the cinematic clock so a temporary FPS drop cannot skip camera shots.
       const introDelta = Math.min(delta, 0.05);
       introTime.current = Math.min(INTRO_DURATION, introTime.current + introDelta);
       const t = introTime.current;
@@ -192,7 +177,7 @@ export default function Experience({
       const startZ = 216;
       const endZ = HOME_LANE.z;
       car.position.set(-LANE_OFFSET, 0.34, THREE.MathUtils.lerp(startZ, endZ, p));
-      car.userData.speed = 18;
+      car.userData.speed = 45;
       car.userData.steer = 0;
 
       const introPct = Math.round(p * 100);
@@ -201,32 +186,30 @@ export default function Experience({
         onIntroProgress?.(p);
       }
 
-      if (t < 2.6) {
-        cameraRig.current.position.lerp(new THREE.Vector3(4.6, 1.28, car.position.z - 13.2), 1 - Math.pow(0.02, delta));
+      if (t < 1.0) {
+        cameraRig.current.position.lerp(new THREE.Vector3(4.6, 1.28, car.position.z - 13.2), 1 - Math.pow(0.008, delta));
         camera.position.copy(cameraRig.current.position);
         camera.lookAt(car.position.x + 0.1, car.position.y + 0.62, car.position.z - 2.5);
-        dampFov(camera, 34, delta);
-      } else if (t < 5.4) {
-        cameraRig.current.position.lerp(new THREE.Vector3(-6.4, 1.72, car.position.z + 4.8), 1 - Math.pow(0.02, delta));
+        dampFov(camera, 36, delta);
+      } else if (t < 2.1) {
+        cameraRig.current.position.lerp(new THREE.Vector3(-5.4, 1.62, car.position.z + 4.2), 1 - Math.pow(0.008, delta));
         camera.position.copy(cameraRig.current.position);
         camera.lookAt(car.position.x - 0.2, car.position.y + 0.98, car.position.z - 3.1);
-        dampFov(camera, 40, delta);
+        dampFov(camera, 42, delta);
       } else {
-        // Two-stage entry: approach the driver's side of the windshield, then
-        // cross it into the real cockpit eye point. All points are car-local.
-        const entrySplit = 7.0;
+        const entrySplit = 2.65;
         const windshieldTarget = carLocalToWorld(car, windshieldEntryLocal(car));
         const driverEye = carLocalToWorld(car, driverEyeLocal(car));
         const driverLook = carLocalToWorld(car, driverLookLocal(car));
 
         if (t < entrySplit) {
-          cameraRig.current.position.lerp(windshieldTarget, 1 - Math.pow(0.018, delta));
+          cameraRig.current.position.lerp(windshieldTarget, 1 - Math.pow(0.005, delta));
         } else {
-          cameraRig.current.position.lerp(driverEye, 1 - Math.pow(0.004, delta));
+          cameraRig.current.position.lerp(driverEye, 1 - Math.pow(0.001, delta));
         }
         camera.position.copy(cameraRig.current.position);
         camera.lookAt(driverLook);
-        dampFov(camera, t < entrySplit ? 54 : 74, delta);
+        dampFov(camera, t < entrySplit ? 58 : 74, delta);
       }
 
       if (t >= INTRO_DURATION && !introCompleted.current) {
@@ -389,19 +372,22 @@ export default function Experience({
       // the final exact dock snap is imperceptible rather than a sideways jump.
       if (remaining < 1.0 && Math.abs(r.laneOffset) < 0.07) r.laneOffset = 0;
 
-      // Real braking profile + low-speed final docking.
-      const brakingSpeed = Math.sqrt(Math.max(0, 2 * 4.8 * remaining));
-      let targetSpeed = Math.min(18.5, brakingSpeed);
-      if (turnApproaching && !docking) targetSpeed = Math.min(targetSpeed, 7.0);
-      if (r.mode === "FOLLOW" && lead) targetSpeed = Math.min(targetSpeed, Math.max(3.0, lead.speed * 0.82));
-      if (r.mode === "OVERTAKE") targetSpeed = Math.min(17.0, Math.max(targetSpeed, 11.5));
-      if (docking) targetSpeed = Math.min(targetSpeed, 4.2);
-      if (finalAlign) targetSpeed = Math.min(targetSpeed, 2.2);
+      // ── High Speed Physics (Target 350 km/h top speed) ──────────────────────────
+      const TOP_SPEED_KMH = 350;
+      const TOP_SPEED_MS = TOP_SPEED_KMH / 3.6; // 97.22 m/s
+
+      // Deceleration rate of ~28 m/s^2 allows smooth braking from 350 km/h over ~170m
+      const brakingSpeed = Math.sqrt(Math.max(0, 2 * 28.0 * remaining));
+      let targetSpeed = Math.min(TOP_SPEED_MS, brakingSpeed);
+      if (turnApproaching && !docking) targetSpeed = Math.min(targetSpeed, 45.0); // ~162 km/h in corners
+      if (r.mode === "FOLLOW" && lead) targetSpeed = Math.min(targetSpeed, Math.max(18.0, lead.speed * 0.95));
+      if (r.mode === "OVERTAKE") targetSpeed = Math.min(TOP_SPEED_MS, Math.max(targetSpeed, 75.0)); // ~270 km/h when passing
+      if (docking) targetSpeed = Math.min(targetSpeed, 18.0);
+      if (finalAlign) targetSpeed = Math.min(targetSpeed, 6.0);
       if (remaining < 0.34) targetSpeed = 0;
 
-      // Final docking is intentionally two-stage: creep to the exact red-bay
-      // centre first, then settle the physical speed to zero before enabling arrival.
-      const accel = targetSpeed > r.speed ? 3.8 : 7.2;
+      // High-performance acceleration & deceleration rates
+      const accel = targetSpeed > r.speed ? 24.0 : 32.0;
       r.speed = THREE.MathUtils.damp(r.speed, targetSpeed, accel, delta);
       r.distance = Math.min(r.total, r.distance + r.speed * delta);
       if (r.total - r.distance < 0.02) {
@@ -417,11 +403,11 @@ export default function Experience({
         r.laneOffset
       );
       car.position.copy(position);
-      car.position.y = 0.34 + Math.sin(state.clock.elapsedTime * 10) * 0.0025;
+      car.position.y = 0.34 + Math.sin(state.clock.elapsedTime * 14) * 0.003;
 
       const desiredYaw = Math.atan2(-motionTangent.x, -motionTangent.z);
       const yawBefore = car.rotation.y;
-      car.rotation.y = dampAngle(car.rotation.y, desiredYaw, 7.2, delta);
+      car.rotation.y = dampAngle(car.rotation.y, desiredYaw, 14.0, delta);
       const yawError = Math.atan2(Math.sin(desiredYaw - yawBefore), Math.cos(desiredYaw - yawBefore));
 
       // ── Steering Calculation ───────────────────────────────────────────────────
@@ -539,7 +525,11 @@ export default function Experience({
       cameraRig.current.position.copy(desiredCamera);
       camera.position.copy(desiredCamera);
       camera.lookAt(lookTarget);
-      dampFov(camera, 74, delta);
+
+      // Dynamic high-speed FOV effect: FOV widens smoothly as vehicle reaches 350 km/h
+      const speedRatio = Math.min(1, (car.userData.speed ?? 0) / 97.22);
+      const dynamicFov = 74 + speedRatio * 9;
+      dampFov(camera, dynamicFov, delta);
     }
   });
 
