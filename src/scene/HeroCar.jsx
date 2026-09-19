@@ -79,40 +79,77 @@ const HeroCar = forwardRef(function HeroCar(
     const exportCone = model.getObjectByName("Cone_95");
     if (exportCone) exportCone.visible = false;
 
-    frontLeftWheel.current = model.getObjectByName("DEF-Wheel.Ft.L_28");
-    frontRightWheel.current = model.getObjectByName("DEF-Wheel.Ft.R_30");
-    rearLeftWheel.current = model.getObjectByName("DEF-Wheel.Bk.L_32");
-    rearRightWheel.current = model.getObjectByName("DEF-Wheel.Bk.R_34");
+    // ── Fix #1: Robust wheel bone discovery ──────────────────────────────────
+    // Try a priority list of known names; fall back to a regex scan over the
+    // entire model so wheels are found even after a GLB re-export renames them.
+    function findBone(primaryNames, fallbackPattern) {
+      for (const name of primaryNames) {
+        const obj = model.getObjectByName(name);
+        if (obj) return obj;
+      }
+      // Regex fallback: scan all objects for the first match.
+      let found = null;
+      model.traverse((obj) => {
+        if (!found && fallbackPattern.test(obj.name)) found = obj;
+      });
+      if (!found) console.warn(`[HeroCar] bone not found for pattern ${fallbackPattern}`);
+      return found;
+    }
 
-    if (frontLeftWheel.current) frontLeftBaseQ.current = frontLeftWheel.current.quaternion.clone();
+    frontLeftWheel.current  = findBone(["DEF-Wheel.Ft.L_28", "Wheel.Ft.L", "wheel_front_left"],  /wheel.*ft.*l|front.*left.*wheel/i);
+    frontRightWheel.current = findBone(["DEF-Wheel.Ft.R_30", "Wheel.Ft.R", "wheel_front_right"], /wheel.*ft.*r|front.*right.*wheel/i);
+    rearLeftWheel.current   = findBone(["DEF-Wheel.Bk.L_32", "Wheel.Bk.L", "wheel_rear_left"],   /wheel.*bk.*l|rear.*left.*wheel/i);
+    rearRightWheel.current  = findBone(["DEF-Wheel.Bk.R_34", "Wheel.Bk.R", "wheel_rear_right"],  /wheel.*bk.*r|rear.*right.*wheel/i);
+
+    if (frontLeftWheel.current)  frontLeftBaseQ.current  = frontLeftWheel.current.quaternion.clone();
     if (frontRightWheel.current) frontRightBaseQ.current = frontRightWheel.current.quaternion.clone();
-    if (rearLeftWheel.current) rearLeftBaseQ.current = rearLeftWheel.current.quaternion.clone();
-    if (rearRightWheel.current) rearRightBaseQ.current = rearRightWheel.current.quaternion.clone();
+    if (rearLeftWheel.current)   rearLeftBaseQ.current   = rearLeftWheel.current.quaternion.clone();
+    if (rearRightWheel.current)  rearRightBaseQ.current  = rearRightWheel.current.quaternion.clone();
 
     // After the model's 180-degree recenter rotation, the source right-door bone
     // is on the driver's/steering-wheel side of the displayed Mustang.
-    driverDoor.current = model.getObjectByName("right door_17");
-    if (driverDoor.current) driverDoorClosedQ.current = driverDoor.current.quaternion.clone();
+    driverDoor.current = model.getObjectByName("right door_17")
+      || findBone(["door_right", "RightDoor"], /right.*door|door.*r/i);
+    if (driverDoor.current) {
+      driverDoorClosedQ.current = driverDoor.current.quaternion.clone();
+    } else {
+      console.warn("[HeroCar] driver door bone not found — door animation disabled");
+    }
 
-    steeringWheel.current = model.getObjectByName("stering bone_10") || model.getObjectByName("stering wheel_23");
-    if (steeringWheel.current) steeringClosedQ.current = steeringWheel.current.quaternion.clone();
+    // ── Fix #7 & #11: Fix steering bone lookup & error reporting ─────────────
+    steeringWheel.current =
+      model.getObjectByName("steering bone_10") ||
+      model.getObjectByName("stering bone_10")  ||
+      model.getObjectByName("steering wheel_23") ||
+      model.getObjectByName("stering wheel_23")  ||
+      findBone(["SteeringWheel", "steering_wheel"], /steering.*wheel|stering.*wheel|steering.*bone|stering.*bone/i);
+    if (steeringWheel.current) {
+      steeringClosedQ.current = steeringWheel.current.quaternion.clone();
+    } else {
+      console.warn("[HeroCar] steering wheel bone not found — steering animation disabled & using default cockpit eye");
+    }
 
     // Derive the cockpit eye from the imported steering-wheel position instead
-    // of guessing a camera coordinate. This keeps the view in the actual driver
-    // seat even if the GLB transform changes later.
-    if (group.current && steeringWheel.current) {
-      group.current.updateMatrixWorld(true);
-      steeringWheel.current.updateMatrixWorld(true);
-      const steeringWorld = new THREE.Vector3();
-      steeringWheel.current.getWorldPosition(steeringWorld);
-      const steeringLocal = group.current.worldToLocal(steeringWorld.clone());
-      group.current.userData.driverEyeLocal = steeringLocal.clone().add(new THREE.Vector3(0, 0.28, 0.38));
-      group.current.userData.driverLookLocal = new THREE.Vector3(
-        steeringLocal.x,
-        steeringLocal.y + 0.24,
-        -15.5
-      );
-      group.current.userData.windshieldEntryLocal = steeringLocal.clone().add(new THREE.Vector3(0, 0.30, -0.10));
+    // of guessing a camera coordinate. Fallback to default if bone missing.
+    if (group.current) {
+      if (steeringWheel.current) {
+        group.current.updateMatrixWorld(true);
+        steeringWheel.current.updateMatrixWorld(true);
+        const steeringWorld = new THREE.Vector3();
+        steeringWheel.current.getWorldPosition(steeringWorld);
+        const steeringLocal = group.current.worldToLocal(steeringWorld.clone());
+        group.current.userData.driverEyeLocal = steeringLocal.clone().add(new THREE.Vector3(0, 0.28, 0.38));
+        group.current.userData.driverLookLocal = new THREE.Vector3(
+          steeringLocal.x,
+          steeringLocal.y + 0.24,
+          -15.5
+        );
+        group.current.userData.windshieldEntryLocal = steeringLocal.clone().add(new THREE.Vector3(0, 0.30, -0.10));
+      } else {
+        group.current.userData.driverEyeLocal = new THREE.Vector3(-0.42, 0.96, 0.16);
+        group.current.userData.driverLookLocal = new THREE.Vector3(-0.44, 0.92, -15.5);
+        group.current.userData.windshieldEntryLocal = new THREE.Vector3(-0.40, 1.00, -0.26);
+      }
     }
 
     // Keep the imported bonnet/hood geometry available: this is the engine cover.
@@ -121,7 +158,11 @@ const HeroCar = forwardRef(function HeroCar(
       model.getObjectByName("bonnet_ok_20"),
       model.getObjectByName("bonnet_ok_20_correction")
     ].filter(Boolean);
-    hoodParts.current.forEach((obj) => { obj.visible = true; });
+    if (hoodParts.current.length > 0) {
+      hoodParts.current.forEach((obj) => { obj.visible = true; });
+    } else {
+      console.warn("[HeroCar] bonnet/hood meshes not found");
+    }
 
     onReady?.();
   }, [model, onReady]);
@@ -132,9 +173,9 @@ const HeroCar = forwardRef(function HeroCar(
     const linearSpeed = carObject?.userData?.speed ?? 0;
     const steeringInput = carObject?.userData?.steer ?? 0;
 
-    // Physical wheel angular velocity (v / r). Keeping this near real speed avoids
-    // stroboscopic aliasing that can make an over-spun wheel look stationary.
-    if (linearSpeed > 0.02) {
+    // Fix #6: Spin wheels for both forward AND reverse movement.
+    // The signed speed drives the angle so reverse speed spins them backward.
+    if (Math.abs(linearSpeed) > 0.02) {
       wheelSpinAngle.current = (wheelSpinAngle.current - (linearSpeed / 0.355) * delta) % (Math.PI * 2);
     }
 
@@ -170,14 +211,15 @@ const HeroCar = forwardRef(function HeroCar(
       driverDoor.current.quaternion.slerp(doorTargetQ, 1 - Math.exp(-5 * delta));
     }
 
-    // Steering wheel follows the planner without destroying its original rig pose.
+    // Steering wheel follows the planner and turns dynamically in cockpit view.
     if (steeringWheel.current && steeringClosedQ.current) {
+      const wheelSteerAngle = steeringInput * 2.1;
       const wheelSteerQ = new THREE.Quaternion().setFromAxisAngle(
         new THREE.Vector3(0, 0, 1),
-        steeringInput * 0.65
+        wheelSteerAngle
       );
       const steerTargetQ = steeringClosedQ.current.clone().multiply(wheelSteerQ);
-      steeringWheel.current.quaternion.slerp(steerTargetQ, 1 - Math.exp(-8 * delta));
+      steeringWheel.current.quaternion.slerp(steerTargetQ, 1 - Math.exp(-12 * delta));
     }
 
     const signal = carObject?.userData?.signal ?? null;

@@ -457,39 +457,81 @@ function TrafficCar({ id, x, startZ, direction = -1, speed = 10, color = "#38424
     }
   });
 
+  // Fix #5: Proper multi-part car silhouette instead of plain boxes.
+  const facing = direction < 0 ? 0 : Math.PI;
+  const isForward = direction < 0;
+
   return (
-    <group ref={ref} position={[x, 0.25, startZ]} rotation={[0, direction < 0 ? 0 : Math.PI, 0]}>
-      <mesh castShadow position={[0, 0.36, 0]}>
-        <boxGeometry args={[1.7, 0.55, 3.7]} />
-        <meshStandardMaterial color={color} metalness={0.72} roughness={0.25} />
-      </mesh>
-      <mesh position={[0, 0.72, 0.15]}>
-        <boxGeometry args={[1.42, 0.42, 1.55]} />
-        <meshStandardMaterial color="#17222a" metalness={0.48} roughness={0.22} />
+    <group ref={ref} position={[x, 0.25, startZ]} rotation={[0, facing, 0]}>
+      {/* Main body */}
+      <mesh castShadow position={[0, 0.33, 0]}>
+        <boxGeometry args={[1.72, 0.52, 3.85]} />
+        <meshStandardMaterial color={color} metalness={0.75} roughness={0.22} />
       </mesh>
 
-      {/* Simple side-door detailing so ambient cars read as real cars. */}
-      {[-1, 1].map((side) => (
-        <group key={side} position={[side * 0.86, 0.48, 0]} rotation={[0, side > 0 ? -Math.PI / 2 : Math.PI / 2, 0]}>
-          <mesh position={[0, 0, -0.72]}>
-            <boxGeometry args={[0.02, 0.28, 1.12]} />
-            <meshStandardMaterial color="#0e1217" metalness={0.18} roughness={0.82} />
+      {/* Cabin / greenhouse */}
+      <mesh position={[0, 0.72, 0.18]}>
+        <boxGeometry args={[1.44, 0.44, 1.72]} />
+        <meshStandardMaterial color="#14202a" metalness={0.45} roughness={0.20} />
+      </mesh>
+
+      {/* Windshield tint */}
+      <mesh position={[0, 0.70, -0.64]}>
+        <boxGeometry args={[1.30, 0.36, 0.06]} />
+        <meshStandardMaterial color="#1e3040" metalness={0.3} roughness={0.12} transparent opacity={0.82} />
+      </mesh>
+      <mesh position={[0, 0.70, 1.02]}>
+        <boxGeometry args={[1.24, 0.32, 0.06]} />
+        <meshStandardMaterial color="#1e3040" metalness={0.3} roughness={0.12} transparent opacity={0.76} />
+      </mesh>
+
+      {/* 4 wheels */}
+      {[[-0.92, -1.32], [0.92, -1.32], [-0.92, 1.30], [0.92, 1.30]].map(([wx, wz], i) => (
+        <group key={i} position={[wx, 0.08, wz]} rotation={[0, 0, Math.PI / 2]}>
+          {/* Tyre */}
+          <mesh>
+            <cylinderGeometry args={[0.28, 0.28, 0.20, 14]} />
+            <meshStandardMaterial color="#111518" roughness={0.92} />
           </mesh>
-          <mesh position={[0, 0, 0.72]}>
-            <boxGeometry args={[0.02, 0.28, 1.12]} />
-            <meshStandardMaterial color="#0e1217" metalness={0.18} roughness={0.82} />
-          </mesh>
-          <mesh position={[0.02, 0.04, -0.04]}>
-            <boxGeometry args={[0.06, 0.035, 0.14]} />
-            <meshStandardMaterial color="#adb8c2" metalness={0.8} roughness={0.2} />
+          {/* Rim */}
+          <mesh>
+            <cylinderGeometry args={[0.17, 0.17, 0.22, 10]} />
+            <meshStandardMaterial color="#6a7580" metalness={0.85} roughness={0.22} />
           </mesh>
         </group>
       ))}
 
-      <mesh position={[0, 0.39, direction < 0 ? -1.87 : 1.87]}>
-        <boxGeometry args={[1.2, 0.13, 0.04]} />
-        <meshStandardMaterial color={direction < 0 ? "#e9fbff" : "#ff3348"} emissive={direction < 0 ? "#b7f0ff" : "#fa1830"} emissiveIntensity={2.2} />
+      {/* Front light bar */}
+      <mesh position={[0, 0.36, isForward ? -1.94 : 1.94]}>
+        <boxGeometry args={[1.28, 0.10, 0.04]} />
+        <meshStandardMaterial
+          color={isForward ? "#e9fbff" : "#ff3348"}
+          emissive={isForward ? "#b7f0ff" : "#fa1830"}
+          emissiveIntensity={2.4}
+          toneMapped={false}
+        />
       </mesh>
+
+      {/* Rear light bar (opposite end) */}
+      <mesh position={[0, 0.36, isForward ? 1.94 : -1.94]}>
+        <boxGeometry args={[1.14, 0.08, 0.04]} />
+        <meshStandardMaterial color="#ff2336" emissive="#e0111e" emissiveIntensity={1.8} toneMapped={false} />
+      </mesh>
+
+      {/* Side door lines */}
+      {[-1, 1].map((side) => (
+        <group key={side} position={[side * 0.87, 0.40, 0]}>
+          <mesh>
+            <boxGeometry args={[0.022, 0.26, 3.50]} />
+            <meshStandardMaterial color="#0c1016" roughness={0.9} />
+          </mesh>
+          {/* Door handle detail */}
+          <mesh position={[side > 0 ? 0.02 : -0.02, 0.04, 0]}>
+            <boxGeometry args={[0.06, 0.032, 0.14]} />
+            <meshStandardMaterial color="#9daab5" metalness={0.82} roughness={0.18} />
+          </mesh>
+        </group>
+      ))}
     </group>
   );
 }

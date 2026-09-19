@@ -1,5 +1,6 @@
-import { Component, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas } from "@react-three/fiber";
+import { useProgress } from "@react-three/drei";
 import Experience from "./Experience";
 import HUD from "./components/HUD";
 import IntroOverlay from "./components/IntroOverlay";
@@ -8,6 +9,23 @@ import DestinationPanel from "./components/DestinationPanel";
 import ArrivalPanel from "./components/ArrivalPanel";
 
 import { DESTINATIONS } from "./data";
+
+// Real asset-loading progress via Drei's useProgress hook.
+function LoadingScreen() {
+  const { progress, item } = useProgress();
+  const pct = Math.round(progress);
+  return (
+    <div className="scene-loading">
+      <strong>AUTONEX</strong>
+      <span>{item ? `Loading ${item.split("/").pop()}…` : "Preparing vehicle and cinematic scene…"}</span>
+      <div className="loading-bar-track">
+        <div className="loading-bar-fill" style={{ width: `${pct}%` }} />
+      </div>
+      <small className="loading-pct">{pct}%</small>
+    </div>
+  );
+}
+
 class SceneErrorBoundary extends Component {
   constructor(props) {
     super(props);
@@ -83,6 +101,7 @@ export default function App() {
 
   function onArrival(id) {
     setArrivedAt(id);
+    setDoorOpen(true);
     setDriveProgress(1);
     setSpeedKmh(0);
     setDriveStatus({ command: "PARK", decision: "DESTINATION REACHED", signal: null, frontDistance: null, passingClear: true, turnAhead: false, ttc: null });
@@ -110,33 +129,31 @@ export default function App() {
         gl={{ antialias: true, powerPreference: "high-performance" }}
         camera={{ position: [7, 3.2, 92], fov: 48, near: 0.02, far: 380 }}
       >
-        <Experience
-          phase={phase}
-          engineOn={engineOn}
-          target={target}
-          arrivedAt={arrivedAt}
-          onArrival={onArrival}
-          onDriveProgress={setDriveProgress}
-          onSpeedChange={setSpeedKmh}
-          onDriveStatus={setDriveStatus}
-          doorOpen={doorOpen}
-          onSceneReady={handleSceneReady}
-          onIntroProgress={setIntroProgress}
-          onIntroComplete={finishIntro}
-          cameraMode={cameraMode}
-        />
+        {/* Fix #10: Suspense gate — intro will only start after the GLB
+            is fully decoded and bones are ready, even on slow machines. */}
+        <Suspense fallback={null}>
+          <Experience
+            phase={phase}
+            engineOn={engineOn}
+            target={target}
+            arrivedAt={arrivedAt}
+            onArrival={onArrival}
+            onDriveProgress={setDriveProgress}
+            onSpeedChange={setSpeedKmh}
+            onDriveStatus={setDriveStatus}
+            doorOpen={doorOpen}
+            onSceneReady={handleSceneReady}
+            onIntroProgress={setIntroProgress}
+            onIntroComplete={finishIntro}
+            cameraMode={cameraMode}
+          />
+        </Suspense>
       </Canvas>
       </SceneErrorBoundary>
 
       <div className="scanlines" />
 
-      {phase === "loading" && (
-        <div className="scene-loading">
-          <strong>AUTONEX</strong>
-          <span>Preparing vehicle and cinematic scene…</span>
-          <i />
-        </div>
-      )}
+      {phase === "loading" && <LoadingScreen />}
 
       {phase === "intro" && <IntroOverlay progress={introProgress} />}
 

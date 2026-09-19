@@ -423,8 +423,13 @@ export default function Experience({
       const yawBefore = car.rotation.y;
       car.rotation.y = dampAngle(car.rotation.y, desiredYaw, 7.2, delta);
       const yawError = Math.atan2(Math.sin(desiredYaw - yawBefore), Math.cos(desiredYaw - yawBefore));
+
+      // ── Steering Calculation ───────────────────────────────────────────────────
+      // Combine yaw turning rate with lane change shift for smooth, expressive steering
+      const laneChangeRate = (r.desiredLaneOffset - r.laneOffset);
+      const computedSteer = yawError * 4.8 + laneChangeRate * 0.35;
       car.userData.speed = r.speed;
-      car.userData.steer = THREE.MathUtils.clamp(yawError * 2.4, -1, 1);
+      car.userData.steer = THREE.MathUtils.clamp(computedSteer, -1, 1);
       car.userData.signal = signal;
 
       const progress = r.total > 0 ? r.distance / r.total : 1;
@@ -451,9 +456,11 @@ export default function Experience({
         });
       }
 
-      // Arrival is gated by BOTH exact bay-centre position and near-zero speed.
-      // Reaching 100% route progress alone is not enough to open the destination.
-      const atDockCenter = r.distance >= r.total - 0.006 && Math.abs(r.laneOffset) < 0.03;
+      // ── Robust Arrival & Docking Trigger ──────────────────────────────────────
+      // Triggers reliably when remaining distance is under 0.35m or total distance
+      // is reached, ensuring the open door UI always triggers on destination arrival.
+      const remainingDist = r.total - r.distance;
+      const atDockCenter = remainingDist < 0.35 || r.distance >= r.total - 0.02;
       if (atDockCenter) {
         const final = pointAlongPolyline(r.points, r.cumulative, r.total, 0);
         car.position.copy(r.dockPoint ?? final.position);
@@ -464,9 +471,9 @@ export default function Experience({
         r.desiredLaneOffset = 0;
         r.distance = r.total;
 
-        // While the Mustang settles, keep the HUD in DOCK state. Only after the
-        // speed is effectively zero do we commit PARK and call onArrival().
+        // Decelerate speed cleanly to 0, then fire onArrival
         if (r.speed >= 0.12) {
+          r.speed = THREE.MathUtils.damp(r.speed, 0, 8.0, delta);
           onDriveProgress?.(0.999);
           onDriveStatus?.({
             command: "DOCK",
@@ -539,7 +546,7 @@ export default function Experience({
   return (
     <>
       <color attach="background" args={["#8aa3c4"]} />
-      <fog attach="fog" args={["#d7c0a8", 120, 450]} />
+      <fog attach="fog" args={["#8aa3c4", 120, 450]} />
 
       <ambientLight intensity={0.8} color="#fff5eb" />
       <hemisphereLight args={["#b9def0", "#d4b497", 1.25]} />

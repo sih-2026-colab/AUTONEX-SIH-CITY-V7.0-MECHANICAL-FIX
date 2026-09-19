@@ -407,6 +407,31 @@ canvas { display: block; }
 }
 @keyframes loading-sweep { 50% { transform: scaleX(.45); opacity: .55; } }
 
+/* Fix #4: Real progress bar replacing the old indeterminate sweep. */
+.loading-bar-track {
+  width: 260px;
+  height: 3px;
+  justify-self: center;
+  background: rgba(255,255,255,.12);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+.loading-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #ffb46f, #fff0d6, #ffd49a);
+  box-shadow: 0 0 12px rgba(255,192,120,.7);
+  border-radius: 2px;
+  transition: width 0.18s ease-out;
+}
+.loading-pct {
+  font-family: Orbitron, Inter, sans-serif;
+  font-size: 11px;
+  letter-spacing: .16em;
+  opacity: .75;
+  margin-top: 2px;
+}
+
 .cockpit-ignition {
   pointer-events: auto;
   position: absolute;
