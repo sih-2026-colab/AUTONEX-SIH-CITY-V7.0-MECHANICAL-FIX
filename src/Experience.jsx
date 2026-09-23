@@ -360,51 +360,61 @@ export default function Experience({
       );
       if (remaining < 1.0 && Math.abs(r.laneOffset) < 0.07) r.laneOffset = 0;
 
-      // ── High-Performance Supercar Engine & Collision Safety Governor ────────────
-      const TOP_SPEED_KMH = 200; // ~55.5 m/s punchy cruising top speed
+      // ── Realistic City Autonomous Speed Model (68 km/h Cruise, 82 km/h Overtake) ─────
+      const TOP_SPEED_KMH = 68; // ~18.89 m/s realistic boulevard cruising top speed
       const TOP_SPEED_MS = TOP_SPEED_KMH / 3.6;
+      const OVERTAKE_SPEED_MS = 82 / 3.6; // ~22.78 m/s passing speed
 
       const smoothDecelDist = Math.max(0, remaining);
-      const brakingSpeed = Math.sqrt(Math.max(0, 2 * 14.0 * smoothDecelDist));
+      const brakingSpeed = Math.sqrt(Math.max(0, 2 * 6.5 * smoothDecelDist));
 
       let targetSpeed = Math.min(TOP_SPEED_MS, brakingSpeed);
-      if (turnApproaching && !docking) targetSpeed = Math.min(targetSpeed, 22.0); // ~80 km/h cornering
-      if (r.mode === "OVERTAKE") targetSpeed = Math.min(TOP_SPEED_MS, Math.max(targetSpeed, 45.0)); // ~162 km/h pass acceleration
-      if (docking) targetSpeed = Math.min(targetSpeed, 12.0);
-      if (finalAlign) targetSpeed = Math.min(targetSpeed, 3.2);
+      if (turnApproaching && !docking) targetSpeed = Math.min(targetSpeed, 11.0); // ~40 km/h cornering
+      if (r.mode === "OVERTAKE") targetSpeed = Math.min(OVERTAKE_SPEED_MS, Math.max(targetSpeed, 22.0)); // ~80 km/h pass speed
+      if (docking) targetSpeed = Math.min(targetSpeed, 6.5);
+      if (finalAlign) targetSpeed = Math.min(targetSpeed, 2.5);
       if (remaining < 0.34) targetSpeed = 0;
 
-      // ── MANDATORY PHYSICAL COLLISION SAFETY GOVERNOR (Anti-Overlap) ──────────────
+      // ── SMART TRAFFIC DECELERATION & COLLISION SAFETY GOVERNOR ─────────────────────
       if (lead && leadDistance < 40.0) {
         const leadLaneOffset = (r.mode === "OVERTAKE" || r.mode === "RETURN") ? passingOffset : LANE_OFFSET;
         const currentLaneDiff = Math.abs(r.laneOffset - leadLaneOffset);
 
-        // If hero car is in (or transitioning into) the same lane as lead car:
+        // If hero car is in (or shifting into) lead car's lane:
         if (currentLaneDiff < 1.5) {
-          const stopGap = 6.2; // Absolute center-to-center clearance limit (~1.8m bumper gap)
+          const stopGap = 6.2; // Absolute center-to-center limit (~1.8m bumper gap)
           const safeGap = 12.0; // Comfortable follow buffer
 
           if (leadDistance <= stopGap) {
-            targetSpeed = 0; // Immediate safety brake to PREVENT ANY OVERLAP!
+            targetSpeed = 0; // Immediate safety brake to PREVENT ANY CONTACT!
           } else if (leadDistance < safeGap) {
+            // Smoothly decelerate to match lead speed or hold safe buffer
             const gapRatio = (leadDistance - stopGap) / (safeGap - stopGap);
             targetSpeed = Math.min(targetSpeed, Math.max(0, lead.speed * gapRatio));
           } else if (r.mode === "FOLLOW") {
+            // Follow mode: match lead speed smoothly while waiting for passing lane to clear
             const followRatio = Math.min(1.0, (leadDistance - safeGap) / 20.0);
             targetSpeed = Math.min(targetSpeed, lead.speed + (targetSpeed - lead.speed) * followRatio);
           }
         } else if (r.mode === "OVERTAKE" && leadDistance < 10.0 && currentLaneDiff > 0.5) {
-          // While shifting laterally, cap speed to lead speed until lateral clearance is established
-          targetSpeed = Math.min(targetSpeed, lead.speed);
+          // Cap speed to lead speed while shifting laterally out of lane
+          targetSpeed = Math.min(targetSpeed, lead.speed + 2.0);
         }
       }
 
-      // Fast, responsive supercar acceleration off the line & during pull
+      // Progressive realistic acceleration throttle curve (no instantaneous 150+ km/h jumps)
       let accel;
       if (targetSpeed > r.speed) {
-        accel = r.speed < 12.0 ? 8.0 : 6.5;
+        if (r.speed < 8.0) {
+          // Smooth 0 -> 30 km/h launch rollout over ~2 seconds
+          accel = 2.0;
+        } else {
+          // Realistic smooth torque pull up to top cruising speed
+          accel = 1.6;
+        }
       } else {
-        accel = (r.speed - targetSpeed > 15.0) ? 10.0 : 6.0;
+        // Natural progressive braking
+        accel = (r.speed - targetSpeed > 8.0) ? 4.5 : 2.5;
       }
 
       r.speed = THREE.MathUtils.damp(r.speed, targetSpeed, accel, delta);

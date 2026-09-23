@@ -47,6 +47,8 @@ const HeroCar = forwardRef(function HeroCar(
 
   const driverDoor = useRef();
   const driverDoorClosedQ = useRef();
+  const passengerDoor = useRef();
+  const passengerDoorClosedQ = useRef();
   const steeringWheel = useRef();
   const steeringClosedQ = useRef();
   const dashLight = useRef();
@@ -113,7 +115,15 @@ const HeroCar = forwardRef(function HeroCar(
     if (driverDoor.current) {
       driverDoorClosedQ.current = driverDoor.current.quaternion.clone();
     } else {
-      console.warn("[HeroCar] driver door bone not found — door animation disabled");
+      console.warn("[HeroCar] driver door bone not found");
+    }
+
+    passengerDoor.current = model.getObjectByName("left door_16")
+      || findBone(["door_left", "LeftDoor"], /left.*door|door.*l/i);
+    if (passengerDoor.current) {
+      passengerDoorClosedQ.current = passengerDoor.current.quaternion.clone();
+    } else {
+      console.warn("[HeroCar] passenger door bone not found");
     }
 
     // ── Fix #7 & #11: Fix steering bone lookup & error reporting ─────────────
@@ -203,12 +213,16 @@ const HeroCar = forwardRef(function HeroCar(
       rearRightWheel.current.quaternion.copy(rearRightBaseQ.current).multiply(spinQ);
     }
 
-    // Animate the real skinned driver-side door bone while preserving its imported
-    // closed orientation. The door only opens after exact destination docking.
+    // Animate both skinned door bones (driver & passenger) symmetrically upon arrival.
     if (driverDoor.current && driverDoorClosedQ.current) {
       const doorSwingQ = new THREE.Quaternion().setFromAxisAngle(LOCAL_Y, doorOpen ? -1.04 : 0);
       const doorTargetQ = driverDoorClosedQ.current.clone().multiply(doorSwingQ);
       driverDoor.current.quaternion.slerp(doorTargetQ, 1 - Math.exp(-5 * delta));
+    }
+    if (passengerDoor.current && passengerDoorClosedQ.current) {
+      const doorSwingQ = new THREE.Quaternion().setFromAxisAngle(LOCAL_Y, doorOpen ? 1.04 : 0);
+      const doorTargetQ = passengerDoorClosedQ.current.clone().multiply(doorSwingQ);
+      passengerDoor.current.quaternion.slerp(doorTargetQ, 1 - Math.exp(-5 * delta));
     }
 
     // Steering wheel follows the planner and turns dynamically in cockpit view.
