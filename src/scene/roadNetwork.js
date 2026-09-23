@@ -197,7 +197,15 @@ export function makeRoadLockedWaypoints(nodeIds, currentPosition) {
   }
 
   result.push(raw[raw.length - 1].clone());
-  return result;
+
+  // Filter out any micro-duplicate adjacent points (<0.05m gap) to avoid zero-length polyline metrics
+  const clean = [result[0]];
+  for (let k = 1; k < result.length; k++) {
+    if (result[k].distanceTo(clean[clean.length - 1]) > 0.05) {
+      clean.push(result[k]);
+    }
+  }
+  return clean;
 }
 
 export function buildPolylineMetrics(points) {

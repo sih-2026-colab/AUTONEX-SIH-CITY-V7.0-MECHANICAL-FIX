@@ -453,12 +453,19 @@ function TrafficCar({ id, x, startZ, direction = -1, speed = 10, color = "#38424
       // dz is positive if hero is ahead of traffic car along travel direction
       const dz = (heroPos.z - ref.current.position.z) * direction;
 
-      if (dx < 2.2 && dz > -2.0 && dz < 16.0) {
-        const safeGap = 7.0;
-        if (dz < safeGap) {
-          currentSpeed = 0; // Immediate full stop to prevent hitting hero car
-        } else {
-          currentSpeed = Math.min(speed, hero.speed * (dz / 16.0));
+      // Only adjust speed if hero car is in the SAME lane (lateral clearance < 1.6m)
+      if (dx < 1.6) {
+        if (dz > 0 && dz < 18.0) {
+          // Hero car is ahead in same lane: match speed to maintain safe gap
+          const safeGap = 8.0;
+          const stopGap = 5.5;
+          if (dz <= stopGap && hero.speed < 0.5) {
+            currentSpeed = 0; // Stop only if hero is completely stationary right ahead
+          } else if (dz < safeGap) {
+            currentSpeed = Math.min(speed, Math.max(0, hero.speed * ((dz - stopGap) / (safeGap - stopGap))));
+          } else {
+            currentSpeed = Math.min(speed, Math.max(hero.speed, speed * 0.8));
+          }
         }
       }
     }
@@ -629,13 +636,13 @@ export default function World({ destinations, dawn = false }) {
         <BackgroundTower key={`${tower.x}-${tower.z}`} {...tower} />
       ))}
 
-      {/* Sparse ambient traffic adds scale without controlling the user's car. */}
-      <TrafficCar id="lead-main" x={-LANE_OFFSET} startZ={126} direction={-1} speed={7.4} color="#39444e" />
-      <TrafficCar id="passing-main" x={LANE_OFFSET} startZ={86} direction={-1} speed={12.6} color="#7b2a31" offset={18} />
-      <TrafficCar id="side-left-1" x={-50.4} startZ={128} direction={-1} speed={11.2} color="#313a44" />
-      <TrafficCar id="side-left-2" x={-53.7} startZ={-90} direction={1} speed={9.6} color="#6a2028" offset={20} />
-      <TrafficCar id="side-right-1" x={50.4} startZ={62} direction={-1} speed={12.0} color="#263f4b" offset={35} />
-      <TrafficCar id="side-right-2" x={53.7} startZ={-250} direction={1} speed={10.4} color="#414850" offset={50} />
+      {/* Ambient traffic moving at natural city cruising speeds. */}
+      <TrafficCar id="lead-main" x={-LANE_OFFSET} startZ={126} direction={-1} speed={19.5} color="#39444e" />
+      <TrafficCar id="passing-main" x={LANE_OFFSET} startZ={86} direction={-1} speed={23.0} color="#7b2a31" offset={18} />
+      <TrafficCar id="side-left-1" x={-50.4} startZ={128} direction={-1} speed={20.0} color="#313a44" />
+      <TrafficCar id="side-left-2" x={-53.7} startZ={-90} direction={1} speed={18.5} color="#6a2028" offset={20} />
+      <TrafficCar id="side-right-1" x={50.4} startZ={62} direction={-1} speed={22.0} color="#263f4b" offset={35} />
+      <TrafficCar id="side-right-2" x={53.7} startZ={-250} direction={1} speed={19.0} color="#414850" offset={50} />
 
       {/* Distant landmark improves skyline depth. */}
       <group position={[110, 0, -82]}>

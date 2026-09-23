@@ -238,7 +238,7 @@ export default function Experience({
       const futureSample = pointAlongPolyline(
         r.points,
         r.cumulative,
-        Math.min(r.total, r.distance + 20),
+        Math.min(r.total, r.distance + 12),
         r.laneOffset
       );
 
@@ -250,7 +250,8 @@ export default function Experience({
         tangent.z * futureTangent.x - tangent.x * futureTangent.z,
         turnDot
       );
-      const turnApproaching = turnAngle > 0.12 && remaining > 4;
+      // Turn detection: only trigger for sharp intersection turns (>20 degrees) nearing within 14m
+      const turnApproaching = turnAngle > 0.35 && remaining > 5;
 
       const normal = new THREE.Vector3(tangent.z, 0, -tangent.x).normalize();
       const actors = getTrafficActors();
@@ -262,7 +263,7 @@ export default function Experience({
         const longitudinal = rel.dot(tangent);
         const lateral = Math.abs(rel.dot(normal));
         const actorDir = actor.velocity.lengthSq() > 0.01 ? actor.velocity.clone().normalize() : tangent;
-        if (longitudinal > 0 && longitudinal < 48 && lateral < 1.75 && actorDir.dot(tangent) > 0.55) {
+        if (longitudinal > 0 && longitudinal < 50 && lateral < 1.8 && actorDir.dot(tangent) > 0.3) {
           if (longitudinal < leadDistance) {
             leadDistance = longitudinal;
             lead = actor;
@@ -279,7 +280,7 @@ export default function Experience({
         const rel = actor.position.clone().sub(passingLaneCenter);
         const longitudinal = rel.dot(tangent);
         const lateral = Math.abs(rel.dot(normal));
-        if (Math.abs(longitudinal) < 22 && lateral < 1.65) {
+        if (longitudinal > -15 && longitudinal < 30 && lateral < 1.6) {
           passingClear = false;
           break;
         }
@@ -294,34 +295,29 @@ export default function Experience({
         const relative = passedActor ? passedActor.position.clone().sub(car.position).dot(tangent) : -20;
         r.desiredLaneOffset = passingOffset;
         const overtakeDelta = passingOffset - r.laneOffset;
-        // Signal only while the lane change is actually happening. For this road
-        // coordinate convention, positive laneOffset is vehicle-left and negative
-        // laneOffset is vehicle-right. Overtaking moves from +offset to -offset.
         signal = Math.abs(overtakeDelta) > 0.14
           ? (overtakeDelta < 0 ? "RIGHT" : "LEFT")
           : null;
         command = "OVERTAKE";
         decision = "PASSING LANE CLEAR";
-        if (relative < -8 || turnApproaching) {
+        if (relative < -10.0 || (turnApproaching && remaining < 25)) {
           r.mode = "RETURN";
           r.desiredLaneOffset = LANE_OFFSET;
         }
       } else if (r.mode === "RETURN") {
         r.desiredLaneOffset = LANE_OFFSET;
         const returnDelta = LANE_OFFSET - r.laneOffset;
-        // Returning from the passing lane increases laneOffset, which is a
-        // physical LEFT lane change for this road coordinate convention.
         signal = Math.abs(returnDelta) > 0.14
           ? (returnDelta < 0 ? "RIGHT" : "LEFT")
           : null;
         command = "RETURN LANE";
         decision = "SAFE GAP CONFIRMED";
-        if (Math.abs(r.laneOffset - LANE_OFFSET) < 0.12) {
+        if (Math.abs(r.laneOffset - LANE_OFFSET) < 0.14) {
           r.mode = "CRUISE";
           r.overtakeActorId = null;
         }
-      } else if (lead && leadDistance < 30) {
-        if (passingClear && !turnApproaching && remaining > 34) {
+      } else if (lead && leadDistance < 35) {
+        if (passingClear && !turnApproaching && remaining > 30) {
           r.mode = "OVERTAKE";
           r.overtakeActorId = lead.id;
           r.desiredLaneOffset = passingOffset;
@@ -345,8 +341,7 @@ export default function Experience({
         decision = "SLOWING FOR INTERSECTION";
       }
 
-      // Destination docking: leave the traffic lane gradually and align exactly
-      // with the center of the red parking bay before any destination action is enabled.
+      // Destination docking
       const docking = remaining < 14.0;
       const finalAlign = remaining < 7.0;
       if (docking) {
@@ -360,45 +355,56 @@ export default function Experience({
       r.laneOffset = THREE.MathUtils.damp(
         r.laneOffset,
         r.desiredLaneOffset,
-        docking ? (finalAlign ? 6.4 : 3.8) : 2.1,
+        docking ? (finalAlign ? 6.4 : 4.5) : 4.2,
         delta
       );
-      // By the last metre the vehicle should already be visually centered, so
-      // the final exact dock snap is imperceptible rather than a sideways jump.
       if (remaining < 1.0 && Math.abs(r.laneOffset) < 0.07) r.laneOffset = 0;
 
-      // ── Realistic Vehicle Inertia & Standstill Launch Model ──────────────────────
-      const TOP_SPEED_KMH = 350;
-      const TOP_SPEED_MS = TOP_SPEED_KMH / 3.6; // 97.22 m/s
+      // ── High-Performance Supercar Engine & Collision Safety Governor ────────────
+      const TOP_SPEED_KMH = 200; // ~55.5 m/s punchy cruising top speed
+      const TOP_SPEED_MS = TOP_SPEED_KMH / 3.6;
 
-      // Smooth, natural braking profile over ~220m
       const smoothDecelDist = Math.max(0, remaining);
-      const brakingSpeed = Math.sqrt(Math.max(0, 2 * 11.5 * smoothDecelDist));
+      const brakingSpeed = Math.sqrt(Math.max(0, 2 * 14.0 * smoothDecelDist));
 
       let targetSpeed = Math.min(TOP_SPEED_MS, brakingSpeed);
-      if (turnApproaching && !docking) targetSpeed = Math.min(targetSpeed, 32.0); // ~115 km/h natural cornering speed
-      if (r.mode === "FOLLOW" && lead) targetSpeed = Math.min(targetSpeed, Math.max(14.0, lead.speed * 0.90));
-      if (r.mode === "OVERTAKE") targetSpeed = Math.min(TOP_SPEED_MS, Math.max(targetSpeed, 55.0)); // ~198 km/h passing ramp
+      if (turnApproaching && !docking) targetSpeed = Math.min(targetSpeed, 22.0); // ~80 km/h cornering
+      if (r.mode === "OVERTAKE") targetSpeed = Math.min(TOP_SPEED_MS, Math.max(targetSpeed, 45.0)); // ~162 km/h pass acceleration
       if (docking) targetSpeed = Math.min(targetSpeed, 12.0);
-      if (finalAlign) targetSpeed = Math.min(targetSpeed, 3.5);
+      if (finalAlign) targetSpeed = Math.min(targetSpeed, 3.2);
       if (remaining < 0.34) targetSpeed = 0;
 
-      // True 0 km/h Standstill Launch: progressive ramp off the line prevents instant jump
-      const speedRatio = Math.min(1, r.speed / TOP_SPEED_MS);
+      // ── MANDATORY PHYSICAL COLLISION SAFETY GOVERNOR (Anti-Overlap) ──────────────
+      if (lead && leadDistance < 40.0) {
+        const leadLaneOffset = (r.mode === "OVERTAKE" || r.mode === "RETURN") ? passingOffset : LANE_OFFSET;
+        const currentLaneDiff = Math.abs(r.laneOffset - leadLaneOffset);
+
+        // If hero car is in (or transitioning into) the same lane as lead car:
+        if (currentLaneDiff < 1.5) {
+          const stopGap = 6.2; // Absolute center-to-center clearance limit (~1.8m bumper gap)
+          const safeGap = 12.0; // Comfortable follow buffer
+
+          if (leadDistance <= stopGap) {
+            targetSpeed = 0; // Immediate safety brake to PREVENT ANY OVERLAP!
+          } else if (leadDistance < safeGap) {
+            const gapRatio = (leadDistance - stopGap) / (safeGap - stopGap);
+            targetSpeed = Math.min(targetSpeed, Math.max(0, lead.speed * gapRatio));
+          } else if (r.mode === "FOLLOW") {
+            const followRatio = Math.min(1.0, (leadDistance - safeGap) / 20.0);
+            targetSpeed = Math.min(targetSpeed, lead.speed + (targetSpeed - lead.speed) * followRatio);
+          }
+        } else if (r.mode === "OVERTAKE" && leadDistance < 10.0 && currentLaneDiff > 0.5) {
+          // While shifting laterally, cap speed to lead speed until lateral clearance is established
+          targetSpeed = Math.min(targetSpeed, lead.speed);
+        }
+      }
+
+      // Fast, responsive supercar acceleration off the line & during pull
       let accel;
       if (targetSpeed > r.speed) {
-        if (r.speed < 8.0) {
-          // Smooth standing launch: gradual 0 -> 30 km/h rollout
-          const launchFactor = Math.max(0.12, r.speed / 8.0);
-          accel = 2.4 * launchFactor + 1.2;
-        } else {
-          // Mid & High speed torque curve: strong pull tapering near 350 km/h
-          const aeroPowerFactor = 1.0 - speedRatio * speedRatio * 0.65;
-          accel = Math.max(1.8, 5.5 * aeroPowerFactor);
-        }
+        accel = r.speed < 12.0 ? 8.0 : 6.5;
       } else {
-        // Natural progressive braking without abrupt step drops
-        accel = r.speed > 25 ? 7.5 : 4.2;
+        accel = (r.speed - targetSpeed > 15.0) ? 10.0 : 6.0;
       }
 
       r.speed = THREE.MathUtils.damp(r.speed, targetSpeed, accel, delta);
