@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { CITY_ROWS, ROAD_WIDTH, LANE_OFFSET } from "./roadNetwork";
-import { getHeroActor, getTrafficActors, removeTrafficActor, updateTrafficActor } from "./trafficState";
+import { getHeroActor, removeTrafficActor, updateTrafficActor } from "./trafficState";
 
 const FLOOR_H = 2.55;
 const SIGN_RED = "#ff142d";
@@ -437,87 +437,70 @@ function ParkingBay({ position, rotation = 0 }) {
 
 function TrafficCar({ id, x, startZ, direction = -1, speed = 10, color = "#38424b", offset = 0 }) {
   const ref = useRef();
-  const speedRef = useRef(speed);
-  const laneX = useRef(x);
 
   useEffect(() => () => { if (id) removeTrafficActor(id); }, [id]);
 
   useFrame((state, delta) => {
     if (!ref.current) return;
 
-    let targetSpeed = speed;
-
-    // 1) Traffic-to-traffic car following: same lane, same direction only.
-    let nearestAhead = Infinity;
-    let aheadSpeed = speed;
-    for (const actor of getTrafficActors()) {
-      if (!actor || actor.id === id) continue;
-      if (Math.abs(actor.position.x - laneX.current) > 1.6) continue;
-      if (Math.sign(actor.velocity.z || direction) !== Math.sign(direction)) continue;
-
-      const longitudinal = direction < 0
-        ? ref.current.position.z - actor.position.z
-        : actor.position.z - ref.current.position.z;
-      if (longitudinal > 0 && longitudinal < nearestAhead) {
-        nearestAhead = longitudinal;
-        aheadSpeed = actor.speed ?? speed;
-      }
-    }
-
-    const ownHalfLength = 1.93;
-    const safeCenterGap = ownHalfLength * 2 + 4.8;
-    if (nearestAhead < safeCenterGap + 10) {
-      const freeGap = Math.max(0, nearestAhead - safeCenterGap);
-      targetSpeed = Math.min(targetSpeed, Math.max(0, aheadSpeed + freeGap * 0.28));
-    }
-    if (nearestAhead < safeCenterGap + 1.0) {
-      targetSpeed = Math.min(targetSpeed, aheadSpeed * 0.72);
-    }
-
-    // 2) Hero keep-out: traffic never runs into the ego vehicle from behind.
+    // Traffic Collision Avoidance: check the hero vehicle, but NEVER crawl.
+    // The AI can only overtake a slower lead car if that car keeps driving at
+    // (near) its own cruise speed. The old logic clamped the traffic car to the
+    // hero's speed for the whole time the hero sat behind it, so both vehicles
+    // marched down the lane nose-to-tail forever and the hero had no room to
+    // pull out. Here the traffic car only yields when the hero is genuinely
+    // closing on it in the SAME lane, and it recovers to cruise speed as soon
+    // as there is a safe gap, which is exactly the window the overtake logic
+    // needs.
     const hero = getHeroActor();
-    if (hero?.position) {
-      const dx = Math.abs(ref.current.position.x - hero.position.x);
-      const dz = (hero.position.z - ref.current.position.z) * direction;
-      if (dx < 1.65 && dz > 0 && dz < 20.0) {
-        const safeGap = 9.0;
-        const stopGap = 6.0;
-        if (dz <= stopGap) {
-          targetSpeed = 0;
-        } else if (dz < safeGap) {
-          const ratio = (dz - stopGap) / (safeGap - stopGap);
-          targetSpeed = Math.min(targetSpeed, Math.max(0, hero.speed * ratio));
-        } else {
-          targetSpeed = Math.min(targetSpeed, Math.max(0, hero.speed + (dz - safeGap) * 0.25));
+    let currentSpeed = speed;
+
+    if (hero && hero.position) {
+      const heroPos = hero.position;
+      const dx = Math.abs(ref.current.position.x - heroPos.x);
+      // Only react when the hero is physically in this car's lane.
+      // 1.35 m is roughly 60% of a lane offset, so a hero halfway through a
+      // lane change is already treated as clear of this car.
+      const sameLane = dx < 1.35;
+
+      if (sameLane) {
+        // dz is positive if the hero is ahead of the traffic car along travel.
+        const dzHeroAhead = (heroPos.z - ref.current.position.z) * direction;
+        // dzTrafficAhead is positive if THIS car is ahead of the hero, i.e. it
+        // is the lead vehicle the hero is trying to overtake.
+        const dzTrafficAhead = -dzHeroAhead;
+
+        if (dzTrafficAhead > 0 && dzTrafficAhead < 22.0) {
+          const heroSpeed = Math.abs(hero.speed ?? 0);
+          const closing = ref.current.position.clone().sub(heroPos).length() > 0 && heroSpeed > speed + 0.8;
+
+          // Only slow down when the hero is actually closing in behind us.
+          // A stationary or slow hero far back must not freeze the traffic.
+          if (closing && dzTrafficAhead < 9.0) {
+            currentSpeed = Math.max(heroSpeed - 0.6, speed * 0.55);
+          }
+          // Otherwise hold full cruise speed: the hero should overtake, not
+          // follow a crawling car.
+        } else if (dzHeroAhead > 0 && dzHeroAhead < 6.0) {
+          // The hero is parked just ahead of us in the same lane (e.g. the
+          // intro / dock sequence). Keep a physical gap instead of driving
+          // through it, but never rely on this to block a moving road.
+          currentSpeed = 0;
         }
       }
     }
 
-    const response = targetSpeed < speedRef.current ? 6.0 : 1.8;
-    speedRef.current = THREE.MathUtils.damp(speedRef.current, targetSpeed, response, delta);
-
-    // Lateral keep-out: ambient traffic stays centered in its assigned lane.
-    ref.current.position.x = THREE.MathUtils.damp(ref.current.position.x, laneX.current, 12, delta);
-    ref.current.position.z += direction * speedRef.current * delta;
-
+    ref.current.position.z += direction * currentSpeed * delta;
     const minZ = -350;
     const maxZ = 178;
-    if (direction < 0 && ref.current.position.z < minZ) {
-      ref.current.position.z = maxZ + offset;
-      speedRef.current = speed;
-    }
-    if (direction > 0 && ref.current.position.z > maxZ) {
-      ref.current.position.z = minZ - offset;
-      speedRef.current = speed;
-    }
+    if (direction < 0 && ref.current.position.z < minZ) ref.current.position.z = maxZ + offset;
+    if (direction > 0 && ref.current.position.z > maxZ) ref.current.position.z = minZ - offset;
 
     if (id) {
       updateTrafficActor(id, {
         position: ref.current.position,
-        velocity: new THREE.Vector3(0, 0, direction * speedRef.current),
-        speed: speedRef.current,
-        halfLength: 1.93,
-        halfWidth: 0.86
+        velocity: new THREE.Vector3(0, 0, direction * currentSpeed),
+        speed: currentSpeed
       });
     }
   });
