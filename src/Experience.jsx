@@ -112,6 +112,7 @@ export default function Experience({
     desiredLaneOffset: LANE_OFFSET,
     mode: "CRUISE",
     overtakeActorId: null,
+    stalledTime: 0,
     dockPoint: HOME.clone()
   });
 
@@ -127,6 +128,7 @@ export default function Experience({
       lastIntroPercent.current = -1;
       onIntroProgress?.(0);
       route.current.active = false;
+      route.current.stalledTime = 0;
       car.position.set(-LANE_OFFSET, 0.34, 216);
       car.rotation.set(0, 0, 0);
       car.userData.speed = 35;
@@ -143,6 +145,7 @@ export default function Experience({
       car.userData.speed = 0;
       car.userData.steer = 0;
       route.current.active = false;
+      route.current.stalledTime = 0;
     }
   }, [phase, camera]);
 
@@ -166,6 +169,7 @@ export default function Experience({
     route.current.desiredLaneOffset = LANE_OFFSET;
     route.current.mode = "CRUISE";
     route.current.overtakeActorId = null;
+    route.current.stalledTime = 0;
     route.current.dockPoint = vecForNode(destNode);
 
     onDriveProgress?.(0);
@@ -293,6 +297,36 @@ export default function Experience({
         const leadHalfLength = lead.halfLength ?? TRAFFIC_HALF_LENGTH;
         leadGap = Math.max(0, leadDistance - EGO_HALF_LENGTH - leadHalfLength);
       }
+
+      // Immediate path hazard: same-lane oncoming or crossing traffic can be
+      // outside the normal same-direction lead filter. Treat only the physical
+      // corridor directly ahead as a blocker so the car cannot drive through an
+      // intersection vehicle, while still allowing normal lane changes.
+      let pathBlocker = null;
+      let pathBlockerDistance = Infinity;
+      for (const actor of actors) {
+        const rel = actor.position.clone().sub(car.position);
+        const longitudinal = rel.dot(tangent);
+        const lateral = Math.abs(rel.dot(normal));
+        const actorDir = actor.velocity.lengthSq() > 0.01
+          ? actor.velocity.clone().normalize()
+          : tangent;
+        const sameDirection = actorDir.dot(tangent) > 0.35;
+
+        if (
+          !sameDirection &&
+          longitudinal > -2.5 &&
+          longitudinal < 9.0 &&
+          lateral < 2.25 &&
+          longitudinal < pathBlockerDistance
+        ) {
+          pathBlocker = actor;
+          pathBlockerDistance = longitudinal;
+        }
+      }
+      const immediatePathBlocker = Boolean(
+        pathBlocker && pathBlockerDistance < 5.5
+      );
 
       const closingSpeed = lead ? Math.max(0, r.speed - lead.speed) : 0;
       const ttc = lead && closingSpeed > 0.20 ? leadGap / closingSpeed : null;
@@ -422,15 +456,24 @@ export default function Experience({
         decision = "SLOWING FOR INTERSECTION";
       }
 
-      // Destination docking
+      // Destination docking must never interrupt an active pass/return maneuver.
       const docking = remaining < 14.0;
       const finalAlign = remaining < 7.0;
-      if (docking) {
+      const maneuverInProgress = r.mode === "OVERTAKE" || r.mode === "RETURN";
+      if (docking && !maneuverInProgress && !immediatePathBlocker) {
         r.mode = "DOCK";
         r.desiredLaneOffset = 0;
         signal = null;
         command = "DOCK";
         decision = finalAlign ? "CENTERING IN RED PARKING BAY" : "ALIGNING WITH DESTINATION BAY";
+      }
+
+      if (immediatePathBlocker && !maneuverInProgress && !docking) {
+        r.mode = "FOLLOW";
+        r.desiredLaneOffset = LANE_OFFSET;
+        signal = null;
+        command = "BRAKE";
+        decision = "PATH BLOCKED — HOLDING SAFE GAP";
       }
 
       r.laneOffset = THREE.MathUtils.damp(
@@ -485,6 +528,10 @@ export default function Experience({
 
       if (r.mode === "RETURN") targetSpeed = Math.min(targetSpeed, TOP_SPEED_MS * 0.92);
 
+      if (immediatePathBlocker) {
+        targetSpeed = 0;
+      }
+
       // Progressive realistic acceleration/braking.
       let accel;
       if (targetSpeed > r.speed) {
@@ -506,7 +553,41 @@ export default function Experience({
           r.speed = Math.min(r.speed, lead.speed);
         }
       }
+
+      if (immediatePathBlocker) {
+        const blockerHalfLength = pathBlocker?.halfLength ?? TRAFFIC_HALF_LENGTH;
+        const blockerCenterDistance = EGO_HALF_LENGTH + blockerHalfLength + HARD_BUMPER_GAP;
+        if (pathBlockerDistance <= blockerCenterDistance + 0.05) {
+          frameAdvance = 0;
+          r.speed = 0;
+        }
+      }
+
+      const previousDistance = r.distance;
       r.distance = Math.min(r.total, r.distance + frameAdvance);
+
+      const movementBlockedByTraffic = Boolean(
+        lead && leadDistance <=
+          EGO_HALF_LENGTH + (lead.halfLength ?? TRAFFIC_HALF_LENGTH) + HARD_BUMPER_GAP + 0.05
+      ) || immediatePathBlocker;
+
+      if (
+        r.mode === "CRUISE" &&
+        !lead &&
+        !movementBlockedByTraffic &&
+        targetSpeed > 2.5 &&
+        r.distance <= previousDistance + 0.0001
+      ) {
+        r.stalledTime = Math.min(2.0, r.stalledTime + delta);
+        if (r.stalledTime > 0.75) {
+          // Recovery changes speed only; route progress still comes from the
+          // normal frameAdvance calculation on subsequent frames.
+          r.speed = Math.max(r.speed, Math.min(targetSpeed, 4.0));
+          r.stalledTime = 0;
+        }
+      } else {
+        r.stalledTime = 0;
+      }
       if (r.total - r.distance < 0.02) {
         r.distance = r.total;
         r.laneOffset = 0;
@@ -549,7 +630,9 @@ export default function Experience({
           command,
           decision,
           signal,
-          frontDistance: Number.isFinite(leadGap) ? Math.max(0, Math.round(leadGap)) : null,
+          frontDistance: Number.isFinite(leadGap)
+            ? Math.max(0, Math.round(leadGap))
+            : (Number.isFinite(pathBlockerDistance) ? Math.max(0, Math.round(pathBlockerDistance)) : null),
           passingClear,
           turnAhead: turnApproaching,
           ttc: ttc != null ? Number(ttc.toFixed(1)) : null
