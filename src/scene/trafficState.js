@@ -7,6 +7,8 @@ export function updateTrafficActor(id, data) {
     position: data.position.clone(),
     velocity: data.velocity.clone(),
     speed: data.speed,
+    halfLength: data.halfLength ?? 1.93,
+    halfWidth: data.halfWidth ?? 0.86,
     updatedAt: performance.now()
   });
 }

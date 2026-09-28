@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { CITY_ROWS, ROAD_WIDTH, LANE_OFFSET } from "./roadNetwork";
-import { getHeroActor, removeTrafficActor, updateTrafficActor } from "./trafficState";
+import { getHeroActor, getTrafficActors, removeTrafficActor, updateTrafficActor } from "./trafficState";
 
 const FLOOR_H = 2.55;
 const SIGN_RED = "#ff142d";
@@ -437,50 +437,87 @@ function ParkingBay({ position, rotation = 0 }) {
 
 function TrafficCar({ id, x, startZ, direction = -1, speed = 10, color = "#38424b", offset = 0 }) {
   const ref = useRef();
+  const speedRef = useRef(speed);
+  const laneX = useRef(x);
 
   useEffect(() => () => { if (id) removeTrafficActor(id); }, [id]);
 
   useFrame((state, delta) => {
     if (!ref.current) return;
 
-    // Traffic Collision Avoidance: Check distance to hero vehicle
+    let targetSpeed = speed;
+
+    // 1) Traffic-to-traffic car following: same lane, same direction only.
+    let nearestAhead = Infinity;
+    let aheadSpeed = speed;
+    for (const actor of getTrafficActors()) {
+      if (!actor || actor.id === id) continue;
+      if (Math.abs(actor.position.x - laneX.current) > 1.6) continue;
+      if (Math.sign(actor.velocity.z || direction) !== Math.sign(direction)) continue;
+
+      const longitudinal = direction < 0
+        ? ref.current.position.z - actor.position.z
+        : actor.position.z - ref.current.position.z;
+      if (longitudinal > 0 && longitudinal < nearestAhead) {
+        nearestAhead = longitudinal;
+        aheadSpeed = actor.speed ?? speed;
+      }
+    }
+
+    const ownHalfLength = 1.93;
+    const safeCenterGap = ownHalfLength * 2 + 4.8;
+    if (nearestAhead < safeCenterGap + 10) {
+      const freeGap = Math.max(0, nearestAhead - safeCenterGap);
+      targetSpeed = Math.min(targetSpeed, Math.max(0, aheadSpeed + freeGap * 0.28));
+    }
+    if (nearestAhead < safeCenterGap + 1.0) {
+      targetSpeed = Math.min(targetSpeed, aheadSpeed * 0.72);
+    }
+
+    // 2) Hero keep-out: traffic never runs into the ego vehicle from behind.
     const hero = getHeroActor();
-    let currentSpeed = speed;
-
-    if (hero && hero.position) {
-      const heroPos = hero.position;
-      const dx = Math.abs(ref.current.position.x - heroPos.x);
-      // dz is positive if hero is ahead of traffic car along travel direction
-      const dz = (heroPos.z - ref.current.position.z) * direction;
-
-      // Only adjust speed if hero car is in the SAME lane (lateral clearance < 1.6m)
-      if (dx < 1.6) {
-        if (dz > 0 && dz < 18.0) {
-          // Hero car is ahead in same lane: match speed to maintain safe gap
-          const safeGap = 8.0;
-          const stopGap = 5.5;
-          if (dz <= stopGap && hero.speed < 0.5) {
-            currentSpeed = 0; // Stop only if hero is completely stationary right ahead
-          } else if (dz < safeGap) {
-            currentSpeed = Math.min(speed, Math.max(0, hero.speed * ((dz - stopGap) / (safeGap - stopGap))));
-          } else {
-            currentSpeed = Math.min(speed, Math.max(hero.speed, speed * 0.8));
-          }
+    if (hero?.position) {
+      const dx = Math.abs(ref.current.position.x - hero.position.x);
+      const dz = (hero.position.z - ref.current.position.z) * direction;
+      if (dx < 1.65 && dz > 0 && dz < 20.0) {
+        const safeGap = 9.0;
+        const stopGap = 6.0;
+        if (dz <= stopGap) {
+          targetSpeed = 0;
+        } else if (dz < safeGap) {
+          const ratio = (dz - stopGap) / (safeGap - stopGap);
+          targetSpeed = Math.min(targetSpeed, Math.max(0, hero.speed * ratio));
+        } else {
+          targetSpeed = Math.min(targetSpeed, Math.max(0, hero.speed + (dz - safeGap) * 0.25));
         }
       }
     }
 
-    ref.current.position.z += direction * currentSpeed * delta;
+    const response = targetSpeed < speedRef.current ? 6.0 : 1.8;
+    speedRef.current = THREE.MathUtils.damp(speedRef.current, targetSpeed, response, delta);
+
+    // Lateral keep-out: ambient traffic stays centered in its assigned lane.
+    ref.current.position.x = THREE.MathUtils.damp(ref.current.position.x, laneX.current, 12, delta);
+    ref.current.position.z += direction * speedRef.current * delta;
+
     const minZ = -350;
     const maxZ = 178;
-    if (direction < 0 && ref.current.position.z < minZ) ref.current.position.z = maxZ + offset;
-    if (direction > 0 && ref.current.position.z > maxZ) ref.current.position.z = minZ - offset;
+    if (direction < 0 && ref.current.position.z < minZ) {
+      ref.current.position.z = maxZ + offset;
+      speedRef.current = speed;
+    }
+    if (direction > 0 && ref.current.position.z > maxZ) {
+      ref.current.position.z = minZ - offset;
+      speedRef.current = speed;
+    }
 
     if (id) {
       updateTrafficActor(id, {
         position: ref.current.position,
-        velocity: new THREE.Vector3(0, 0, direction * currentSpeed),
-        speed: currentSpeed
+        velocity: new THREE.Vector3(0, 0, direction * speedRef.current),
+        speed: speedRef.current,
+        halfLength: 1.93,
+        halfWidth: 0.86
       });
     }
   });

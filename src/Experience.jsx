@@ -22,6 +22,16 @@ const HOME_LANE = HOME.clone().add(new THREE.Vector3(-LANE_OFFSET, 0, 0));
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const INTRO_DURATION = 3.2;
 
+// Physical envelope used by the safety planner. Distances below are measured
+// along the current road tangent, with a hard geometric guard as the final layer.
+const EGO_HALF_LENGTH = 2.45;
+const TRAFFIC_HALF_LENGTH = 1.93;
+const HARD_BUMPER_GAP = 2.4;
+const MIN_FOLLOW_GAP = 8.5;
+const FOLLOW_HEADWAY = 0.85;
+const OVERTAKE_TRIGGER_GAP = 28.0;
+const RETURN_CLEARANCE = 9.0;
+
 // Cockpit points are vehicle-local coordinates. The imported GT500's steering
 // assembly sits on local -X after the model is recentered/rotated in HeroCar.
 const DRIVER_EYE_LOCAL = new THREE.Vector3(-0.42, 0.96, 0.16);
@@ -257,34 +267,77 @@ export default function Experience({
       const actors = getTrafficActors();
       let lead = null;
       let leadDistance = Infinity;
+      let leadGap = Infinity;
 
+      // Nearest same-direction actor in the ego vehicle's CURRENT physical lane.
+      // Keeping this active during a partial lane change prevents side/rear overlap.
       for (const actor of actors) {
         const rel = actor.position.clone().sub(car.position);
         const longitudinal = rel.dot(tangent);
         const lateral = Math.abs(rel.dot(normal));
-        const actorDir = actor.velocity.lengthSq() > 0.01 ? actor.velocity.clone().normalize() : tangent;
-        if (longitudinal > 0 && longitudinal < 50 && lateral < 1.8 && actorDir.dot(tangent) > 0.3) {
-          if (longitudinal < leadDistance) {
-            leadDistance = longitudinal;
-            lead = actor;
-          }
+        const actorDir = actor.velocity.lengthSq() > 0.01
+          ? actor.velocity.clone().normalize()
+          : tangent;
+
+        if (
+          longitudinal > 0 && longitudinal < 65 &&
+          lateral < 2.10 && actorDir.dot(tangent) > 0.35 &&
+          longitudinal < leadDistance
+        ) {
+          leadDistance = longitudinal;
+          lead = actor;
         }
       }
 
-      const passingOffset = -LANE_OFFSET;
-      const laneDelta = passingOffset - r.laneOffset;
-      const passingLaneCenter = car.position.clone().add(normal.clone().multiplyScalar(laneDelta));
-      let passingClear = true;
-      for (const actor of actors) {
-        if (lead && actor.id === lead.id) continue;
-        const rel = actor.position.clone().sub(passingLaneCenter);
-        const longitudinal = rel.dot(tangent);
-        const lateral = Math.abs(rel.dot(normal));
-        if (longitudinal > -15 && longitudinal < 30 && lateral < 1.6) {
-          passingClear = false;
-          break;
-        }
+      if (lead) {
+        const leadHalfLength = lead.halfLength ?? TRAFFIC_HALF_LENGTH;
+        leadGap = Math.max(0, leadDistance - EGO_HALF_LENGTH - leadHalfLength);
       }
+
+      const closingSpeed = lead ? Math.max(0, r.speed - lead.speed) : 0;
+      const ttc = lead && closingSpeed > 0.20 ? leadGap / closingSpeed : null;
+      const desiredFollowGap = Math.max(MIN_FOLLOW_GAP, 5.5 + r.speed * FOLLOW_HEADWAY);
+      const emergencyFrontRisk = Boolean(
+        lead && (leadGap < HARD_BUMPER_GAP + 1.1 || (ttc != null && ttc < 1.35))
+      );
+
+      const passingOffset = -LANE_OFFSET;
+      const passingLaneDelta = passingOffset - r.laneOffset;
+      const originalLaneDelta = LANE_OFFSET - r.laneOffset;
+
+      function laneHasSafeGap(targetLaneDelta, ignoreId = null, frontGap = 32, rearGap = 22) {
+        for (const actor of actors) {
+          if (ignoreId && actor.id === ignoreId) continue;
+          const rel = actor.position.clone().sub(car.position);
+          const longitudinal = rel.dot(tangent);
+          const lateralFromTarget = Math.abs(rel.dot(normal) - targetLaneDelta);
+          if (lateralFromTarget > 2.05) continue;
+
+          const actorDir = actor.velocity.lengthSq() > 0.01
+            ? actor.velocity.clone().normalize()
+            : tangent;
+          if (actorDir.dot(tangent) < 0.2 && longitudinal > -14 && longitudinal < 52) {
+            return false;
+          }
+          if (longitudinal > -rearGap && longitudinal < frontGap) return false;
+        }
+        return true;
+      }
+
+      const passingFrontGap = Math.max(30, r.speed * 1.35);
+      const passingRearGap = Math.max(20, r.speed * 0.95);
+      const passingClear = laneHasSafeGap(
+        passingLaneDelta,
+        lead?.id ?? null,
+        passingFrontGap,
+        passingRearGap
+      );
+      const originalLaneClear = laneHasSafeGap(
+        originalLaneDelta,
+        r.overtakeActorId,
+        26,
+        18
+      );
 
       let command = "CRUISE";
       let decision = "ROAD CLEAR";
@@ -292,50 +345,78 @@ export default function Experience({
 
       if (r.mode === "OVERTAKE") {
         const passedActor = actors.find((a) => a.id === r.overtakeActorId);
-        const relative = passedActor ? passedActor.position.clone().sub(car.position).dot(tangent) : -20;
+        const relative = passedActor
+          ? passedActor.position.clone().sub(car.position).dot(tangent)
+          : -40;
+        const passedHalf = passedActor?.halfLength ?? TRAFFIC_HALF_LENGTH;
+        const fullyPast = relative < -(EGO_HALF_LENGTH + passedHalf + RETURN_CLEARANCE);
+
         r.desiredLaneOffset = passingOffset;
-        const overtakeDelta = passingOffset - r.laneOffset;
-        signal = Math.abs(overtakeDelta) > 0.14
-          ? (overtakeDelta < 0 ? "RIGHT" : "LEFT")
-          : null;
-        command = "OVERTAKE";
-        decision = "PASSING LANE CLEAR";
-        if (relative < -10.0 || (turnApproaching && remaining < 25)) {
+        const laneChangeDelta = passingOffset - r.laneOffset;
+        const inPassingLane = Math.abs(laneChangeDelta) < 0.18;
+        signal = !inPassingLane ? (laneChangeDelta < 0 ? "RIGHT" : "LEFT") : null;
+        command = inPassingLane ? "OVERTAKE" : "LANE CHANGE";
+        decision = inPassingLane ? "PASSING LEAD VEHICLE" : "MOVING TO VERIFIED PASSING LANE";
+
+        // Never cut back in front of the passed vehicle. Return only after both
+        // longitudinal clearance and the original-lane gap have been verified.
+        if (fullyPast && originalLaneClear) {
           r.mode = "RETURN";
           r.desiredLaneOffset = LANE_OFFSET;
         }
       } else if (r.mode === "RETURN") {
-        r.desiredLaneOffset = LANE_OFFSET;
-        const returnDelta = LANE_OFFSET - r.laneOffset;
-        signal = Math.abs(returnDelta) > 0.14
-          ? (returnDelta < 0 ? "RIGHT" : "LEFT")
-          : null;
-        command = "RETURN LANE";
-        decision = "SAFE GAP CONFIRMED";
-        if (Math.abs(r.laneOffset - LANE_OFFSET) < 0.14) {
-          r.mode = "CRUISE";
-          r.overtakeActorId = null;
+        if (!originalLaneClear) {
+          r.desiredLaneOffset = passingOffset;
+          command = "WAIT";
+          decision = "ORIGINAL LANE NOT CLEAR";
+          signal = null;
+        } else {
+          r.desiredLaneOffset = LANE_OFFSET;
+          const returnDelta = LANE_OFFSET - r.laneOffset;
+          signal = Math.abs(returnDelta) > 0.14
+            ? (returnDelta < 0 ? "RIGHT" : "LEFT")
+            : null;
+          command = "RETURN LANE";
+          decision = "SAFE RETURN GAP CONFIRMED";
+          if (Math.abs(returnDelta) < 0.12) {
+            r.mode = "CRUISE";
+            r.overtakeActorId = null;
+          }
         }
-      } else if (lead && leadDistance < 35) {
-        if (passingClear && !turnApproaching && remaining > 30) {
+      } else if (lead) {
+        const shouldPass = leadGap < OVERTAKE_TRIGGER_GAP || leadGap < desiredFollowGap;
+
+        if (
+          shouldPass && passingClear && !turnApproaching &&
+          remaining > 40 && !emergencyFrontRisk
+        ) {
           r.mode = "OVERTAKE";
           r.overtakeActorId = lead.id;
           r.desiredLaneOffset = passingOffset;
           signal = passingOffset < r.laneOffset ? "RIGHT" : "LEFT";
-          command = "OVERTAKE";
-          decision = "FRONT VEHICLE + PASSING LANE CLEAR";
-        } else {
+          command = "LANE CHANGE";
+          decision = "FRONT VEHICLE — PASSING LANE VERIFIED";
+        } else if (leadGap < desiredFollowGap || emergencyFrontRisk) {
+          // Passing not possible yet: maintain a safe gap and retry every frame.
           r.mode = "FOLLOW";
           r.desiredLaneOffset = LANE_OFFSET;
-          command = "WAIT";
-          decision = passingClear ? "TURN AHEAD — HOLD POSITION" : "PASSING LANE OCCUPIED";
+          command = emergencyFrontRisk ? "BRAKE" : "WAIT";
+          decision = emergencyFrontRisk
+            ? "SAFE GAP CRITICAL — BRAKING"
+            : passingClear
+              ? "WAITING FOR SAFE OVERTAKE POINT"
+              : "PASSING LANE OCCUPIED — HOLD GAP";
+        } else {
+          r.mode = "CRUISE";
+          r.desiredLaneOffset = LANE_OFFSET;
         }
       } else if (r.mode === "FOLLOW") {
         r.mode = "CRUISE";
         r.desiredLaneOffset = LANE_OFFSET;
       }
 
-      if (turnApproaching && r.mode !== "OVERTAKE") {
+      // Turn handling is lower priority than collision avoidance and lane changes.
+      if (turnApproaching && r.mode === "CRUISE") {
         signal = signedTurn > 0 ? "LEFT" : "RIGHT";
         command = "TURN";
         decision = "SLOWING FOR INTERSECTION";
@@ -376,49 +457,56 @@ export default function Experience({
       if (remaining < 0.34) targetSpeed = 0;
 
       // ── SMART TRAFFIC DECELERATION & COLLISION SAFETY GOVERNOR ─────────────────────
-      if (lead && leadDistance < 40.0) {
-        const leadLaneOffset = (r.mode === "OVERTAKE" || r.mode === "RETURN") ? passingOffset : LANE_OFFSET;
-        const currentLaneDiff = Math.abs(r.laneOffset - leadLaneOffset);
+      if (r.mode === "FOLLOW" && lead) {
+        // Automatic car-following while the passing lane is unavailable.
+        const gapError = leadGap - desiredFollowGap;
+        const followTarget = THREE.MathUtils.clamp(
+          lead.speed + gapError * 0.32,
+          0,
+          lead.speed + 0.8
+        );
+        targetSpeed = Math.min(targetSpeed, followTarget);
+        if (emergencyFrontRisk || leadGap <= HARD_BUMPER_GAP + 0.6) targetSpeed = 0;
+      }
 
-        // If hero car is in (or shifting into) lead car's lane:
-        if (currentLaneDiff < 1.5) {
-          const stopGap = 6.2; // Absolute center-to-center limit (~1.8m bumper gap)
-          const safeGap = 12.0; // Comfortable follow buffer
-
-          if (leadDistance <= stopGap) {
-            targetSpeed = 0; // Immediate safety brake to PREVENT ANY CONTACT!
-          } else if (leadDistance < safeGap) {
-            // Smoothly decelerate to match lead speed or hold safe buffer
-            const gapRatio = (leadDistance - stopGap) / (safeGap - stopGap);
-            targetSpeed = Math.min(targetSpeed, Math.max(0, lead.speed * gapRatio));
-          } else if (r.mode === "FOLLOW") {
-            // Follow mode: match lead speed smoothly while waiting for passing lane to clear
-            const followRatio = Math.min(1.0, (leadDistance - safeGap) / 20.0);
-            targetSpeed = Math.min(targetSpeed, lead.speed + (targetSpeed - lead.speed) * followRatio);
+      if (r.mode === "OVERTAKE") {
+        const passedActor = actors.find((a) => a.id === r.overtakeActorId);
+        const laneChangeComplete = Math.abs(r.laneOffset - passingOffset) < 0.20;
+        if (!laneChangeComplete && passedActor) {
+          // Establish lateral separation before accelerating past the lead car.
+          targetSpeed = Math.min(targetSpeed, Math.max(0, passedActor.speed * 0.92));
+          if (lead && leadGap < desiredFollowGap) {
+            targetSpeed = Math.min(targetSpeed, Math.max(0, lead.speed * 0.78));
           }
-        } else if (r.mode === "OVERTAKE" && leadDistance < 10.0 && currentLaneDiff > 0.5) {
-          // Cap speed to lead speed while shifting laterally out of lane
-          targetSpeed = Math.min(targetSpeed, lead.speed + 2.0);
+        } else {
+          targetSpeed = Math.min(OVERTAKE_SPEED_MS, Math.max(targetSpeed, (passedActor?.speed ?? 10) + 4.5));
         }
       }
 
-      // Progressive realistic acceleration throttle curve (no instantaneous 150+ km/h jumps)
+      if (r.mode === "RETURN") targetSpeed = Math.min(targetSpeed, TOP_SPEED_MS * 0.92);
+
+      // Progressive realistic acceleration/braking.
       let accel;
       if (targetSpeed > r.speed) {
-        if (r.speed < 8.0) {
-          // Smooth 0 -> 30 km/h launch rollout over ~2 seconds
-          accel = 2.0;
-        } else {
-          // Realistic smooth torque pull up to top cruising speed
-          accel = 1.6;
-        }
+        accel = r.speed < 8.0 ? 2.0 : 1.6;
       } else {
-        // Natural progressive braking
-        accel = (r.speed - targetSpeed > 8.0) ? 4.5 : 2.5;
+        accel = emergencyFrontRisk ? 12.0 : ((r.speed - targetSpeed > 8.0) ? 5.0 : 3.0);
       }
-
       r.speed = THREE.MathUtils.damp(r.speed, targetSpeed, accel, delta);
-      r.distance = Math.min(r.total, r.distance + r.speed * delta);
+
+      // Hard geometric collision guard. Even during a delayed lane-change frame,
+      // the ego vehicle cannot advance inside the lead vehicle's safety envelope.
+      let frameAdvance = r.speed * delta;
+      if (lead) {
+        const leadHalfLength = lead.halfLength ?? TRAFFIC_HALF_LENGTH;
+        const hardCenterDistance = EGO_HALF_LENGTH + leadHalfLength + HARD_BUMPER_GAP;
+        frameAdvance = Math.min(frameAdvance, Math.max(0, leadDistance - hardCenterDistance));
+        if (leadDistance <= hardCenterDistance + 0.05) {
+          frameAdvance = 0;
+          r.speed = Math.min(r.speed, lead.speed);
+        }
+      }
+      r.distance = Math.min(r.total, r.distance + frameAdvance);
       if (r.total - r.distance < 0.02) {
         r.distance = r.total;
         r.laneOffset = 0;
@@ -456,15 +544,12 @@ export default function Experience({
         onSpeedChange?.(kmh);
       }
 
-      const closingSpeed = lead ? Math.max(0, r.speed - lead.speed) : 0;
-      const ttc = lead && closingSpeed > 0.25 ? leadDistance / closingSpeed : null;
-
       if (state.clock.elapsedTime % 0.2 < delta) {
         onDriveStatus?.({
           command,
           decision,
           signal,
-          frontDistance: Number.isFinite(leadDistance) ? Math.round(leadDistance) : null,
+          frontDistance: Number.isFinite(leadGap) ? Math.max(0, Math.round(leadGap)) : null,
           passingClear,
           turnAhead: turnApproaching,
           ttc: ttc != null ? Number(ttc.toFixed(1)) : null
