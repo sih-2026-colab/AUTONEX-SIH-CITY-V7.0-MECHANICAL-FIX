@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import HeroCar from "./scene/HeroCar";
 import World from "./scene/World";
+import CatActor from "./scene/CatActor";
 import { DESTINATIONS } from "./data";
 import {
   DESTINATION_NODE,
@@ -15,7 +16,8 @@ import {
   vecForNode,
   LANE_OFFSET
 } from "./scene/roadNetwork";
-import { getTrafficActors, updateHeroActor } from "./scene/trafficState";
+import { getTrafficActors, updateHeroActor, safeMotionFraction, vehicleBounds } from "./scene/trafficState";
+import { makeCatReflexDecision } from "./scene/catReflexEngine.js";
 
 const HOME = vecForNode(HOME_NODE);
 const HOME_LANE = HOME.clone().add(new THREE.Vector3(-LANE_OFFSET, 0, 0));
@@ -81,19 +83,41 @@ export default function Experience({
   onDriveProgress,
   onSpeedChange,
   onDriveStatus,
+  onCatReflexUpdate,
   doorOpen,
   onSceneReady,
   onIntroProgress,
   onIntroComplete,
-  cameraMode = "cockpit"
+  cameraMode = "cockpit",
+  catReflexActive = false,
+  catScenarioType = 0,
 }) {
   const carRef = useRef();
   const cameraRig = useRef();
   const introTime = useRef(0);
   const lastReportedSpeed = useRef(-1);
+  const lastReportedProgress = useRef(-1);
   const lastIntroPercent = useRef(-1);
   const introCompleted = useRef(false);
   const { camera } = useThree();
+
+  // Cat Reflex state
+  const catActorRef = useRef();
+  const catPosRef = useRef(null);       // current cat world position {x,z}
+  const catPrevPosRef = useRef(null);   // previous frame cat position
+  const catDtAccum = useRef(0);         // time since last cat pos update
+  const catVisibleRef = useRef(false);
+  const catReflexResult = useRef(null);
+  const catReflexReportTimer = useRef(0);
+
+  const handleCatState = useCallback(({ catPos, catState, catVisible }) => {
+    catVisibleRef.current = catVisible;
+    if (catPos) {
+      catPosRef.current = catPos;
+    } else {
+      catPosRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     camera.near = 0.03;
@@ -172,6 +196,7 @@ export default function Experience({
     route.current.stalledTime = 0;
     route.current.dockPoint = vecForNode(destNode);
 
+    lastReportedProgress.current = -1;
     onDriveProgress?.(0);
     onSpeedChange?.(0);
   }, [target, arrivedAt, onDriveProgress, onSpeedChange]);
@@ -179,9 +204,10 @@ export default function Experience({
   useFrame((state, delta) => {
     if (!carRef.current || !cameraRig.current) return;
     const car = carRef.current;
+    delta = Math.min(delta, 0.05);
 
     // Broadcast hero car position to traffic system for dual-sided collision avoidance
-    updateHeroActor({ position: car.position, speed: car.userData?.speed ?? 0 });
+    updateHeroActor({ position: car.position, speed: car.userData?.speed ?? 0, yaw: car.rotation.y });
 
     if (phase === "loading") return;
 
@@ -285,7 +311,7 @@ export default function Experience({
 
         if (
           longitudinal > 0 && longitudinal < 65 &&
-          lateral < 2.10 && actorDir.dot(tangent) > 0.35 &&
+          lateral < 1.0 + actor.halfWidth + 0.3 && actorDir.dot(tangent) > 0.35 &&
           longitudinal < leadDistance
         ) {
           leadDistance = longitudinal;
@@ -339,13 +365,12 @@ export default function Experience({
       const passingLaneDelta = passingOffset - r.laneOffset;
       const originalLaneDelta = LANE_OFFSET - r.laneOffset;
 
-      function laneHasSafeGap(targetLaneDelta, ignoreId = null, frontGap = 32, rearGap = 22) {
+      function laneHasSafeGap(targetLaneDelta, frontGap = 40, rearGap = 22) {
         for (const actor of actors) {
-          if (ignoreId && actor.id === ignoreId) continue;
           const rel = actor.position.clone().sub(car.position);
           const longitudinal = rel.dot(tangent);
           const lateralFromTarget = Math.abs(rel.dot(normal) - targetLaneDelta);
-          if (lateralFromTarget > 2.05) continue;
+          if (lateralFromTarget > 1.0 + actor.halfWidth + 0.3) continue;
 
           const actorDir = actor.velocity.lengthSq() > 0.01
             ? actor.velocity.clone().normalize()
@@ -358,17 +383,15 @@ export default function Experience({
         return true;
       }
 
-      const passingFrontGap = Math.max(30, r.speed * 1.35);
+      const passingFrontGap = Math.max(40, r.speed * 1.35);
       const passingRearGap = Math.max(20, r.speed * 0.95);
       const passingClear = laneHasSafeGap(
         passingLaneDelta,
-        lead?.id ?? null,
         passingFrontGap,
         passingRearGap
       );
       const originalLaneClear = laneHasSafeGap(
         originalLaneDelta,
-        r.overtakeActorId,
         26,
         18
       );
@@ -385,7 +408,7 @@ export default function Experience({
         const passedHalf = passedActor?.halfLength ?? TRAFFIC_HALF_LENGTH;
         const fullyPast = relative < -(EGO_HALF_LENGTH + passedHalf + RETURN_CLEARANCE);
 
-        r.desiredLaneOffset = passingOffset;
+        r.desiredLaneOffset = passingClear ? passingOffset : r.laneOffset;
         const laneChangeDelta = passingOffset - r.laneOffset;
         const inPassingLane = Math.abs(laneChangeDelta) < 0.18;
         signal = !inPassingLane ? (laneChangeDelta < 0 ? "RIGHT" : "LEFT") : null;
@@ -420,26 +443,43 @@ export default function Experience({
       } else if (lead) {
         const shouldPass = leadGap < OVERTAKE_TRIGGER_GAP || leadGap < desiredFollowGap;
 
-        if (
-          shouldPass && passingClear && !turnApproaching &&
-          remaining > 40 && !emergencyFrontRisk
-        ) {
+        // The lead vehicle is close enough that we must react to it.
+        const leadTooClose = leadGap < desiredFollowGap;
+        const leadStalled = lead.speed < 0.4 && leadGap < HARD_BUMPER_GAP + 3.5;
+        // Too close to still be accelerating into it — we need lateral escape now.
+        const imminent = leadGap < HARD_BUMPER_GAP + 4.0 || emergencyFrontRisk;
+
+        // OVERTAKING IS THE DEFAULT RESPONSE TO A SLOWER CAR AHEAD.
+        // Whenever the passing lane is clear we pull out and go around, rather
+        // than braking to sit behind the vehicle. The old logic required
+        // `!emergencyFrontRisk` and `remaining > 40`, so once the ego got close
+        // it could never start the lane change and deadlocked against the car
+        // in front. Only a physically occupied passing lane blocks this now.
+        const wantOvertake = (leadTooClose || shouldPass || imminent || leadStalled);
+
+        if (wantOvertake && passingClear) {
           r.mode = "OVERTAKE";
           r.overtakeActorId = lead.id;
           r.desiredLaneOffset = passingOffset;
           signal = passingOffset < r.laneOffset ? "RIGHT" : "LEFT";
           command = "LANE CHANGE";
-          decision = "FRONT VEHICLE — PASSING LANE VERIFIED";
-        } else if (leadGap < desiredFollowGap || emergencyFrontRisk) {
-          // Passing not possible yet: maintain a safe gap and retry every frame.
+
+          if (leadStalled) {
+            decision = "LEAD VEHICLE STOPPED — ESCAPING TO PASSING LANE";
+          } else if (imminent) {
+            decision = "CLOSING ON SLOWER VEHICLE — OVERTAKING";
+          } else {
+            decision = "FRONT VEHICLE — PASSING LANE VERIFIED";
+          }
+        } else if (leadTooClose || imminent) {
+          // The passing lane is genuinely blocked. Hold a safe gap in-lane and
+          // keep re-testing every frame; we must not drive through the car.
           r.mode = "FOLLOW";
           r.desiredLaneOffset = LANE_OFFSET;
           command = emergencyFrontRisk ? "BRAKE" : "WAIT";
           decision = emergencyFrontRisk
-            ? "SAFE GAP CRITICAL — BRAKING"
-            : passingClear
-              ? "WAITING FOR SAFE OVERTAKE POINT"
-              : "PASSING LANE OCCUPIED — HOLD GAP";
+            ? "PASSING LANE BLOCKED — HOLDING SAFE GAP"
+            : "PASSING LANE OCCUPIED — WAITING TO OVERTAKE";
         } else {
           r.mode = "CRUISE";
           r.desiredLaneOffset = LANE_OFFSET;
@@ -456,8 +496,13 @@ export default function Experience({
         decision = "SLOWING FOR INTERSECTION";
       }
 
+<<<<<<< HEAD
       // Destination docking must never interrupt an active pass/return maneuver.
       const docking = remaining < 14.0;
+=======
+      // Destination docking
+      const docking = remaining < 14.0 && r.mode !== "OVERTAKE" && r.mode !== "RETURN";
+>>>>>>> bf071df (fix(physics): resolve vehicle freeze, optimize HUD re-renders, add Cat Reflex HUD, and update view button layout)
       const finalAlign = remaining < 7.0;
       const maneuverInProgress = r.mode === "OVERTAKE" || r.mode === "RETURN";
       if (docking && !maneuverInProgress && !immediatePathBlocker) {
@@ -468,6 +513,7 @@ export default function Experience({
         decision = finalAlign ? "CENTERING IN RED PARKING BAY" : "ALIGNING WITH DESTINATION BAY";
       }
 
+<<<<<<< HEAD
       if (immediatePathBlocker && !maneuverInProgress && !docking) {
         r.mode = "FOLLOW";
         r.desiredLaneOffset = LANE_OFFSET;
@@ -476,6 +522,9 @@ export default function Experience({
         decision = "PATH BLOCKED — HOLDING SAFE GAP";
       }
 
+=======
+      const previousLaneOffset = r.laneOffset;
+>>>>>>> bf071df (fix(physics): resolve vehicle freeze, optimize HUD re-renders, add Cat Reflex HUD, and update view button layout)
       r.laneOffset = THREE.MathUtils.damp(
         r.laneOffset,
         r.desiredLaneOffset,
@@ -509,17 +558,33 @@ export default function Experience({
           lead.speed + 0.8
         );
         targetSpeed = Math.min(targetSpeed, followTarget);
-        if (emergencyFrontRisk || leadGap <= HARD_BUMPER_GAP + 0.6) targetSpeed = 0;
+
+        // Never let a stopped lead vehicle hold us at a standstill forever.
+        // If the lead is parked and the passing lane is clear, the mode logic
+        // has already queued an escape overtake; until the lane change begins
+        // we hold a safe stop, but we must not treat stopped traffic as a
+        // permanent follow target.
+        const leadStalled = lead.speed < 0.4 && leadGap < HARD_BUMPER_GAP + 2.5;
+        if ((emergencyFrontRisk || leadGap <= HARD_BUMPER_GAP + 0.6) && !leadStalled) {
+          targetSpeed = 0;
+        } else if (leadStalled) {
+          targetSpeed = Math.min(targetSpeed, leadGap <= HARD_BUMPER_GAP + 0.6 ? 0 : 1.6);
+        }
       }
 
       if (r.mode === "OVERTAKE") {
         const passedActor = actors.find((a) => a.id === r.overtakeActorId);
         const laneChangeComplete = Math.abs(r.laneOffset - passingOffset) < 0.20;
         if (!laneChangeComplete && passedActor) {
-          // Establish lateral separation before accelerating past the lead car.
-          targetSpeed = Math.min(targetSpeed, Math.max(0, passedActor.speed * 0.92));
-          if (lead && leadGap < desiredFollowGap) {
-            targetSpeed = Math.min(targetSpeed, Math.max(0, lead.speed * 0.78));
+          const lateralClearance = Math.abs(r.laneOffset - passingOffset);
+          const targetLeadSpeed = Math.max(passedActor.speed, TOP_SPEED_MS * 0.55);
+          if (lateralClearance > 1.2) {
+            targetSpeed = Math.min(targetSpeed, Math.max(passedActor.speed, 6.0));
+          } else {
+            targetSpeed = Math.min(OVERTAKE_SPEED_MS, Math.max(targetSpeed, targetLeadSpeed + 2.0));
+          }
+          if (lead && leadGap < HARD_BUMPER_GAP + 1.5) {
+            targetSpeed = Math.min(targetSpeed, Math.max(lead.speed, 2.0));
           }
         } else {
           targetSpeed = Math.min(OVERTAKE_SPEED_MS, Math.max(targetSpeed, (passedActor?.speed ?? 10) + 4.5));
@@ -537,21 +602,36 @@ export default function Experience({
       if (targetSpeed > r.speed) {
         accel = r.speed < 8.0 ? 2.0 : 1.6;
       } else {
-        accel = emergencyFrontRisk ? 12.0 : ((r.speed - targetSpeed > 8.0) ? 5.0 : 3.0);
+        // Only brake hard for a genuinely imminent rear-end in OUR lane. When we
+        // have committed to an overtake the lateral separation is what keeps us
+        // safe, and a full emergency stop would abort the lane change.
+        const hardBrake = emergencyFrontRisk && r.mode !== "OVERTAKE" && r.mode !== "RETURN";
+        accel = hardBrake ? 12.0 : ((r.speed - targetSpeed > 8.0) ? 5.0 : 3.0);
       }
       r.speed = THREE.MathUtils.damp(r.speed, targetSpeed, accel, delta);
 
-      // Hard geometric collision guard. Even during a delayed lane-change frame,
-      // the ego vehicle cannot advance inside the lead vehicle's safety envelope.
-      let frameAdvance = r.speed * delta;
-      if (lead) {
-        const leadHalfLength = lead.halfLength ?? TRAFFIC_HALF_LENGTH;
-        const hardCenterDistance = EGO_HALF_LENGTH + leadHalfLength + HARD_BUMPER_GAP;
-        frameAdvance = Math.min(frameAdvance, Math.max(0, leadDistance - hardCenterDistance));
-        if (leadDistance <= hardCenterDistance + 0.05) {
-          frameAdvance = 0;
-          r.speed = Math.min(r.speed, lead.speed);
-        }
+      // A stopped car can pull out laterally without advancing into its lead.
+      const yaw = Math.atan2(-tangent.x, -tangent.z);
+      const bounds = vehicleBounds(car.rotation.y);
+      const plannedBounds = vehicleBounds(yaw);
+      bounds.x = Math.max(bounds.x, plannedBounds.x);
+      bounds.z = Math.max(bounds.z, plannedBounds.z);
+      const lateralPosition = pointAlongPolyline(r.points, r.cumulative, r.distance, r.laneOffset).position;
+      const lateralFraction = safeMotionFraction(car.position, lateralPosition, bounds, actors);
+      r.laneOffset = THREE.MathUtils.lerp(previousLaneOffset, r.laneOffset, lateralFraction);
+      const startPosition = pointAlongPolyline(r.points, r.cumulative, r.distance, r.laneOffset).position;
+      let frameAdvance = Math.min(r.speed * delta, remaining);
+      if (lead && Math.abs(lead.position.clone().sub(startPosition).dot(normal)) < 1.0 + lead.halfWidth + 0.3) {
+        frameAdvance = Math.min(frameAdvance, Math.max(0, leadGap - HARD_BUMPER_GAP));
+      }
+      const candidate = pointAlongPolyline(r.points, r.cumulative, r.distance + frameAdvance, r.laneOffset);
+      const endBounds = vehicleBounds(Math.atan2(-candidate.tangent.x, -candidate.tangent.z));
+      bounds.x = Math.max(bounds.x, endBounds.x);
+      bounds.z = Math.max(bounds.z, endBounds.z);
+      const motionFraction = safeMotionFraction(startPosition, candidate.position, bounds, actors);
+      frameAdvance *= motionFraction;
+      if (motionFraction < 0.1) {
+        r.speed = THREE.MathUtils.damp(r.speed, 0, 6.0, delta);
       }
 
       if (immediatePathBlocker) {
@@ -565,7 +645,6 @@ export default function Experience({
 
       const previousDistance = r.distance;
       r.distance = Math.min(r.total, r.distance + frameAdvance);
-
       const movementBlockedByTraffic = Boolean(
         lead && leadDistance <=
           EGO_HALF_LENGTH + (lead.halfLength ?? TRAFFIC_HALF_LENGTH) + HARD_BUMPER_GAP + 0.05
@@ -580,15 +659,14 @@ export default function Experience({
       ) {
         r.stalledTime = Math.min(2.0, r.stalledTime + delta);
         if (r.stalledTime > 0.75) {
-          // Recovery changes speed only; route progress still comes from the
-          // normal frameAdvance calculation on subsequent frames.
           r.speed = Math.max(r.speed, Math.min(targetSpeed, 4.0));
           r.stalledTime = 0;
         }
       } else {
         r.stalledTime = 0;
       }
-      if (r.total - r.distance < 0.02) {
+
+      if (docking && r.total - r.distance < 0.02) {
         r.distance = r.total;
         r.laneOffset = 0;
         r.desiredLaneOffset = 0;
@@ -617,12 +695,68 @@ export default function Experience({
       car.userData.signal = signal;
 
       const progress = r.total > 0 ? r.distance / r.total : 1;
-      onDriveProgress?.(progress);
+      const progressPct = Math.floor(progress * 100);
+      if (progressPct !== lastReportedProgress.current) {
+        lastReportedProgress.current = progressPct;
+        onDriveProgress?.(progress);
+      }
 
       const kmh = Math.round(r.speed * 3.6);
       if (kmh !== lastReportedSpeed.current) {
         lastReportedSpeed.current = kmh;
         onSpeedChange?.(kmh);
+      }
+
+      // ── Cat Reflex integration ─────────────────────────────────────────────
+      // Run the Cat Reflex engine every frame when a cat is visible.
+      // The engine outputs override command/decision and impose a speed cap.
+      let catSpeedOverride = null;
+      catDtAccum.current += delta;
+
+      if (catReflexActive && catVisibleRef.current && catPosRef.current) {
+        // Build tangent from current motion direction
+        const crTangent = { x: tangent.x, z: tangent.z };
+        const egoPos2d = { x: car.position.x, z: car.position.z };
+
+        const crResult = makeCatReflexDecision({
+          egoPos: egoPos2d,
+          egoSpeed: r.speed,
+          tangent: crTangent,
+          catPos: catPosRef.current,
+          catPrevPos: catPrevPosRef.current,
+          catDt: catDtAccum.current,
+          detected: true,
+        });
+
+        catReflexResult.current = crResult;
+        catPrevPosRef.current = { ...catPosRef.current };
+        catDtAccum.current = 0;
+
+        // Override the drive command/decision with cat reflex output
+        command = crResult.command;
+        decision = crResult.decision;
+        catSpeedOverride = crResult.targetSpeedOverride;
+
+        // Report cat reflex data to UI every ~100ms
+        catReflexReportTimer.current += delta;
+        if (catReflexReportTimer.current >= 0.1) {
+          catReflexReportTimer.current = 0;
+          onCatReflexUpdate?.(crResult);
+        }
+      } else if (catReflexActive && !catVisibleRef.current) {
+        // Cat gone / crossed — clear override
+        catReflexResult.current = null;
+        catPrevPosRef.current = null;
+        catDtAccum.current = 0;
+        onCatReflexUpdate?.(null);
+      }
+
+      // Apply cat speed override on top of normal speed logic
+      if (catSpeedOverride != null) {
+        // Use strong deceleration for emergency, gentle for warning
+        const isEmergency = command === "EMERGENCY BRAKE";
+        const brakeStrength = isEmergency ? 15.0 : 6.0;
+        r.speed = THREE.MathUtils.damp(r.speed, catSpeedOverride, brakeStrength, delta);
       }
 
       if (state.clock.elapsedTime % 0.2 < delta) {
@@ -643,7 +777,7 @@ export default function Experience({
       // Triggers reliably when remaining distance is under 0.35m or total distance
       // is reached, ensuring the open door UI always triggers on destination arrival.
       const remainingDist = r.total - r.distance;
-      const atDockCenter = remainingDist < 0.35 || r.distance >= r.total - 0.02;
+      const atDockCenter = docking && (remainingDist < 0.35 || r.distance >= r.total - 0.02);
       if (atDockCenter) {
         const final = pointAlongPolyline(r.points, r.cumulative, r.total, 0);
         car.position.copy(r.dockPoint ?? final.position);
@@ -692,6 +826,8 @@ export default function Experience({
       car.userData.steer = 0;
       car.userData.signal = null;
     }
+
+    updateHeroActor({ position: car.position, speed: car.userData.speed, yaw: car.rotation.y });
 
     let desiredCamera;
     let lookTarget;
@@ -750,6 +886,18 @@ export default function Experience({
       <group ref={cameraRig} />
       <World destinations={destinations} dawn />
       <HeroCar ref={carRef} engineOn={engineOn} doorOpen={doorOpen} headlights onReady={onSceneReady} />
+
+      {/* Cat Reflex: only rendered in the world phase when active */}
+      {phase === "world" && catReflexActive && (
+        <CatActor
+          ref={catActorRef}
+          active={catReflexActive}
+          egoPosition={carRef.current?.position ?? null}
+          egoYaw={carRef.current?.rotation?.y ?? 0}
+          onCatState={handleCatState}
+          scenarioType={catScenarioType}
+        />
+      )}
     </>
   );
 }

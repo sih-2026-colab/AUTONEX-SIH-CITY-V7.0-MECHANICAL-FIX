@@ -482,7 +482,7 @@ canvas { display: block; }
 .camera-toggle {
   position: fixed;
   z-index: 12;
-  right: 22px;
+  left: 22px;
   bottom: 22px;
   min-width: 142px;
   padding: 11px 15px 10px;
@@ -518,5 +518,275 @@ canvas { display: block; }
   letter-spacing: .12em;
 }
 @media (max-width: 700px) {
-  .camera-toggle { right: 10px; bottom: 12px; min-width: 126px; padding: 9px 11px; }
+  .camera-toggle { left: 10px; bottom: 12px; min-width: 126px; padding: 9px 11px; }
 }
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CAT REFLEX — AutoNex Sudden-Intrusion Pipeline HUD
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.cat-reflex-hud {
+  position: fixed;
+  z-index: 14;
+  right: 20px;
+  top: 175px;
+  width: min(340px, calc(100vw - 32px));
+  padding: 14px;
+  background: rgba(4, 8, 14, 0.88);
+  border: 1px solid rgba(255, 90, 40, 0.42);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 14px 48px rgba(0,0,0,0.38), 0 0 28px rgba(255,70,30,0.08);
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 9px;
+  color: #c0cad8;
+  animation: crh-appear 0.22s ease;
+  max-height: calc(100vh - 195px);
+  overflow-y: auto;
+}
+@keyframes crh-appear {
+  from { opacity: 0; transform: translateX(18px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+.crh-header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 11px;
+}
+.crh-badge {
+  background: rgba(255, 80, 30, 0.22);
+  border: 1px solid rgba(255, 80, 30, 0.55);
+  color: #ff6a2a;
+  font-size: 8px;
+  letter-spacing: .18em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.crh-title {
+  font-size: 8px;
+  letter-spacing: .10em;
+  color: #8a9cb0;
+}
+
+/* ── Pipeline stages ── */
+.crh-pipeline {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.crh-stage {
+  font-size: 7px;
+  letter-spacing: .12em;
+  color: #4a5a6a;
+  border: 1px solid rgba(255,255,255,.08);
+  padding: 3px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  transition: all .3s ease;
+}
+.crh-stage-done {
+  color: #4dffaa;
+  border-color: rgba(77,255,170,.32);
+  background: rgba(77,255,170,.06);
+}
+.crh-stage-tick {
+  margin-right: 3px;
+  font-size: 7px;
+}
+.crh-arrow {
+  color: rgba(255,255,255,.18);
+  font-size: 9px;
+  flex-shrink: 0;
+}
+
+/* ── Metrics grid ── */
+.crh-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  margin-bottom: 10px;
+  border: 1px solid rgba(255,255,255,.05);
+}
+.crh-metric {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 7px;
+  border-bottom: 1px solid rgba(255,255,255,.04);
+  font-size: 9px;
+  color: #8a9cb0;
+}
+.crh-metric:nth-child(odd) { border-right: 1px solid rgba(255,255,255,.04); }
+.crh-metric b { color: #e8f0f8; font-weight: 600; font-size: 9px; }
+
+/* ── Risk bar ── */
+.crh-risk-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+.crh-risk-label {
+  font-size: 8px;
+  letter-spacing: .14em;
+  color: #8a9cb0;
+  white-space: nowrap;
+}
+.crh-risk-bar-track {
+  flex: 1;
+  height: 5px;
+  background: rgba(255,255,255,.06);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.crh-risk-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width .15s ease, background .15s ease;
+  box-shadow: 0 0 8px currentColor;
+}
+.crh-risk-pct {
+  font-size: 10px;
+  font-weight: 700;
+  min-width: 28px;
+  text-align: right;
+}
+.crh-risk-level {
+  font-size: 8px;
+  letter-spacing: .14em;
+  min-width: 52px;
+  text-align: right;
+}
+
+/* ── Predicted position note ── */
+.crh-pred {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 0;
+  font-size: 8px;
+  color: #7a8ea4;
+  border-top: 1px solid rgba(255,255,255,.05);
+  margin-bottom: 6px;
+}
+.crh-pred b { color: #c0d0e4; }
+
+/* ── Replan note ── */
+.crh-replan {
+  font-size: 8px;
+  letter-spacing: .12em;
+  color: #ffcc00;
+  padding: 4px 0;
+  border-top: 1px solid rgba(255,204,0,.16);
+  margin-bottom: 8px;
+  text-align: center;
+}
+
+/* ── Decision banner ── */
+.crh-decision {
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 4px;
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: rgba(255,255,255,.025);
+  transition: border-color .2s ease, color .2s ease;
+}
+.crh-decision-cmd {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: .12em;
+}
+.crh-decision-text {
+  font-size: 8px;
+  letter-spacing: .10em;
+  color: #9aacbe;
+}
+
+/* ── Cat Reflex trigger panel ── */
+.cat-reflex-trigger {
+  position: fixed;
+  z-index: 13;
+  left: 20px;
+  bottom: 100px;
+  width: 192px;
+  padding: 12px;
+  background: rgba(4, 10, 16, 0.82);
+  border: 1px solid rgba(255, 90, 40, 0.36);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 12px 38px rgba(0,0,0,.28);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.crt-label {
+  font-size: 8px;
+  letter-spacing: .18em;
+  color: #ff6a30;
+  font-weight: 700;
+}
+.crt-scenario {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 8px;
+  color: #8a9cb0;
+  letter-spacing: .08em;
+}
+.crt-cycle {
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.12);
+  color: #d0dae8;
+  font-size: 8px;
+  letter-spacing: .06em;
+  padding: 3px 7px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: border-color .18s ease, background .18s ease;
+}
+.crt-cycle:hover {
+  border-color: rgba(255,150,80,.52);
+  background: rgba(255,100,40,.1);
+  color: #ffb080;
+}
+.crt-fire {
+  width: 100%;
+  padding: 9px;
+  background: rgba(255, 70, 20, 0.18);
+  border: 1px solid rgba(255, 70, 20, 0.52);
+  color: #ff7040;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all .18s ease;
+}
+.crt-fire:hover {
+  background: rgba(255, 80, 30, 0.3);
+  border-color: rgba(255, 110, 60, 0.8);
+  box-shadow: 0 0 18px rgba(255,70,20,.22);
+  color: #ff9060;
+}
+.crt-fire.active {
+  background: rgba(255, 30, 10, 0.22);
+  border-color: rgba(255, 40, 10, 0.72);
+  color: #ff4020;
+  animation: cat-pulse 0.9s infinite alternate;
+}
+@keyframes cat-pulse {
+  from { box-shadow: 0 0 8px rgba(255,40,10,.28); }
+  to   { box-shadow: 0 0 28px rgba(255,40,10,.55); }
+}
+
+@media (max-width: 700px) {
+  .cat-reflex-hud { right: 8px; top: 8px; width: calc(100vw - 16px); }
+  .cat-reflex-trigger { left: 8px; bottom: 88px; width: 168px; }
+}
+

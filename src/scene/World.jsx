@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { CITY_ROWS, ROAD_WIDTH, LANE_OFFSET } from "./roadNetwork";
-import { getHeroActor, removeTrafficActor, updateTrafficActor } from "./trafficState";
+import { getHeroActor, getTrafficActors, removeTrafficActor, updateTrafficActor, safeMotionFraction, vehicleBounds } from "./trafficState";
 
 const FLOOR_H = 2.55;
 const SIGN_RED = "#ff142d";
@@ -443,58 +443,25 @@ function TrafficCar({ id, x, startZ, direction = -1, speed = 10, color = "#38424
   useFrame((state, delta) => {
     if (!ref.current) return;
 
-    // Traffic Collision Avoidance: check the hero vehicle, but NEVER crawl.
-    // The AI can only overtake a slower lead car if that car keeps driving at
-    // (near) its own cruise speed. The old logic clamped the traffic car to the
-    // hero's speed for the whole time the hero sat behind it, so both vehicles
-    // marched down the lane nose-to-tail forever and the hero had no room to
-    // pull out. Here the traffic car only yields when the hero is genuinely
-    // closing on it in the SAME lane, and it recovers to cruise speed as soon
-    // as there is a safe gap, which is exactly the window the overtake logic
-    // needs.
+    delta = Math.min(delta, 0.05);
     const hero = getHeroActor();
-    let currentSpeed = speed;
-
-    if (hero && hero.position) {
-      const heroPos = hero.position;
-      const dx = Math.abs(ref.current.position.x - heroPos.x);
-      // Only react when the hero is physically in this car's lane.
-      // 1.35 m is roughly 60% of a lane offset, so a hero halfway through a
-      // lane change is already treated as clear of this car.
-      const sameLane = dx < 1.35;
-
-      if (sameLane) {
-        // dz is positive if the hero is ahead of the traffic car along travel.
-        const dzHeroAhead = (heroPos.z - ref.current.position.z) * direction;
-        // dzTrafficAhead is positive if THIS car is ahead of the hero, i.e. it
-        // is the lead vehicle the hero is trying to overtake.
-        const dzTrafficAhead = -dzHeroAhead;
-
-        if (dzTrafficAhead > 0 && dzTrafficAhead < 22.0) {
-          const heroSpeed = Math.abs(hero.speed ?? 0);
-          const closing = ref.current.position.clone().sub(heroPos).length() > 0 && heroSpeed > speed + 0.8;
-
-          // Only slow down when the hero is actually closing in behind us.
-          // A stationary or slow hero far back must not freeze the traffic.
-          if (closing && dzTrafficAhead < 9.0) {
-            currentSpeed = Math.max(heroSpeed - 0.6, speed * 0.55);
-          }
-          // Otherwise hold full cruise speed: the hero should overtake, not
-          // follow a crawling car.
-        } else if (dzHeroAhead > 0 && dzHeroAhead < 6.0) {
-          // The hero is parked just ahead of us in the same lane (e.g. the
-          // intro / dock sequence). Keep a physical gap instead of driving
-          // through it, but never rely on this to block a moving road.
-          currentSpeed = 0;
-        }
-      }
-    }
-
+    const obstacles = getTrafficActors().filter(actor => actor.id !== id);
+    if (hero.position) obstacles.push({ position: hero.position, bounds: vehicleBounds(hero.yaw) });
+    const next = ref.current.position.clone();
+    next.z += direction * speed * delta;
+    const fraction = safeMotionFraction(ref.current.position, next, vehicleBounds(0, 1.0, 1.93), obstacles);
+    const currentSpeed = speed * fraction;
     ref.current.position.z += direction * currentSpeed * delta;
     const minZ = -350;
     const maxZ = 178;
-    if (direction < 0 && ref.current.position.z < minZ) ref.current.position.z = maxZ + offset;
-    if (direction > 0 && ref.current.position.z > maxZ) ref.current.position.z = minZ - offset;
+    // Preserve off-road recycling, but defer it while the spawn area is occupied.
+    if ((direction < 0 && ref.current.position.z < minZ) || (direction > 0 && ref.current.position.z > maxZ)) {
+      const spawn = ref.current.position.clone();
+      spawn.z = direction < 0 ? maxZ + offset : minZ - offset;
+      if (safeMotionFraction(spawn, spawn, vehicleBounds(0, 1.0, 1.93), obstacles, 8) === 1) {
+        ref.current.position.copy(spawn);
+      }
+    }
 
     if (id) {
       updateTrafficActor(id, {

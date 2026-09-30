@@ -7,6 +7,7 @@ import IntroOverlay from "./components/IntroOverlay";
 import EngineOverlay from "./components/EngineOverlay";
 import DestinationPanel from "./components/DestinationPanel";
 import ArrivalPanel from "./components/ArrivalPanel";
+import CatReflexHUD from "./components/CatReflexHUD";
 
 import { DESTINATIONS } from "./data";
 
@@ -65,6 +66,13 @@ export default function App() {
   const [speedKmh, setSpeedKmh] = useState(0);
   const [cameraMode, setCameraMode] = useState("cockpit");
   const [driveStatus, setDriveStatus] = useState({ command: "IDLE", decision: "ROAD CLEAR", signal: null, frontDistance: null, passingClear: true, turnAhead: false, ttc: null });
+
+  // Cat Reflex state
+  const [catReflexActive, setCatReflexActive] = useState(false);
+  const [catReflex, setCatReflex] = useState(null);       // latest engine output
+  const [catScenarioType, setCatScenarioType] = useState(0);
+  const catScenarioNames = ["Normal Cross", "Pause Mid-Road", "Retreat", "Fast Dash"];
+
   const bootTimer = useRef(null);
 
   const target = useMemo(
@@ -115,6 +123,24 @@ export default function App() {
     setDriveProgress(0);
     setSpeedKmh(0);
     setDriveStatus({ command: "IDLE", decision: "ROAD CLEAR", signal: null, frontDistance: null, passingClear: true, turnAhead: false, ttc: null });
+    // Stop cat reflex when route is reset
+    setCatReflexActive(false);
+    setCatReflex(null);
+  }
+
+  function triggerCatReflex() {
+    // Cat Reflex requires an active route
+    if (!targetId || arrivedAt) return;
+    setCatReflex(null);
+    setCatReflexActive(false);
+    // Small delay to reset state then re-activate
+    setTimeout(() => {
+      setCatReflexActive(true);
+    }, 80);
+  }
+
+  function cycleCatScenario() {
+    setCatScenarioType(t => (t + 1) % 4);
   }
 
   // Arrival UI is intentionally enabled only by Experience.onArrival after exact bay docking.
@@ -141,11 +167,14 @@ export default function App() {
             onDriveProgress={setDriveProgress}
             onSpeedChange={setSpeedKmh}
             onDriveStatus={setDriveStatus}
+            onCatReflexUpdate={setCatReflex}
             doorOpen={doorOpen}
             onSceneReady={handleSceneReady}
             onIntroProgress={setIntroProgress}
             onIntroComplete={finishIntro}
             cameraMode={cameraMode}
+            catReflexActive={catReflexActive}
+            catScenarioType={catScenarioType}
           />
         </Suspense>
       </Canvas>
@@ -194,6 +223,32 @@ export default function App() {
               CANCEL ROUTE
             </button>
           )}
+
+          {/* Cat Reflex trigger panel - only when actively driving */}
+          {targetId && !arrivedAt && (
+            <div className="cat-reflex-trigger">
+              <div className="crt-label">CAT REFLEX DEMO</div>
+              <div className="crt-scenario">
+                <span>SCENARIO:</span>
+                <button className="crt-cycle" onClick={cycleCatScenario}>
+                  {catScenarioNames[catScenarioType]}
+                </button>
+              </div>
+              <button
+                className={`crt-fire ${catReflexActive ? "active" : ""}`}
+                onClick={triggerCatReflex}
+              >
+                {catReflexActive ? "\u26A0 CAT ACTIVE" : "\u25BA TRIGGER CAT"}
+              </button>
+            </div>
+          )}
+
+          {/* Cat Reflex HUD overlay */}
+          <CatReflexHUD
+            catReflex={catReflex}
+            speedKmh={speedKmh}
+            active={catReflexActive}
+          />
 
           {activeDestination && (
             <ArrivalPanel
