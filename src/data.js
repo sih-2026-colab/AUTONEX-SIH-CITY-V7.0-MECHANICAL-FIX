@@ -8,7 +8,7 @@ export const DESTINATIONS = [
     towerStyle: "crown",
     floors: 12,
     color: "#ff1833",
-    url: "#team"
+    url: "https://docs.google.com/document/d/1xk0iFPwnA-nw46-AvyYjCPuKCEb_Y3dh/edit?usp=drivesdk&ouid=102923114460510304912&rtpof=true&sd=true"
   },
   {
     id: "prototype",
@@ -41,7 +41,7 @@ export const DESTINATIONS = [
     towerStyle: "glass",
     floors: 15,
     color: "#ff1833",
-    url: "https://github.com/sih-2026-colab"
+    url: "https://github.com/sih-2026-colab/sih-2026-team"
   },
   {
     id: "video",
