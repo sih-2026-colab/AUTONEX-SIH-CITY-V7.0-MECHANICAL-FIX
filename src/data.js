@@ -8,7 +8,7 @@ export const DESTINATIONS = [
     towerStyle: "crown",
     floors: 12,
     color: "#ff1833",
-    url: "https://docs.google.com/document/d/1xk0iFPwnA-nw46-AvyYjCPuKCEb_Y3dh/edit?usp=drivesdk&ouid=102923114460510304912&rtpof=true&sd=true"
+    url: "https://docs.google.com/document/d/1y51HWH0V8vGZys40Ef07kgfLDFH0iQUB/edit?usp=drivesdk&ouid=102923114460510304912&rtpof=true&sd=true"
   },
   {
     id: "prototype",
