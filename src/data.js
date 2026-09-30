@@ -19,7 +19,7 @@ export const DESTINATIONS = [
     towerStyle: "atrium",
     floors: 11,
     color: "#ff1833",
-    url: "https://your-prototype-link.example.com/"
+    url: "https://drive.google.com/drive/folders/1z33e5olIF3HKJHZH1zsRW5r2-BJbxAL3"
   },
   {
     id: "matlab",
@@ -52,7 +52,11 @@ export const DESTINATIONS = [
     towerStyle: "stepped",
     floors: 13,
     color: "#ff1833",
-    url: "https://www.youtube.com/"
+    url: "https://youtu.be/RJ23JnxZQUI?si=RzbmRzBzJdQDWKl_",
+    subLinks: [
+      { label: "🎬 ANIMATION VIDEO", url: "https://youtu.be/RJ23JnxZQUI?si=RzbmRzBzJdQDWKl_" },
+      { label: "🎥 INDIVIDUAL VIDEOS", url: "https://drive.google.com/drive/folders/1z33e5olIF3HKJHZH1zsRW5r2-BJbxAL3" }
+    ]
   },
   {
     id: "architecture",

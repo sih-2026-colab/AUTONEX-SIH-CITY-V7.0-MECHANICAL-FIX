@@ -4,15 +4,17 @@ export default function ArrivalPanel({
   onOpenDoor,
   onBack
 }) {
-  function visit() {
-    if (destination.url.startsWith("#")) {
+  function visit(url) {
+    if (!url || url.startsWith("#")) {
       alert(
         `${destination.label} section placeholder.\nReplace its URL in src/data.js with your final SIH link.`
       );
       return;
     }
-    window.open(destination.url, "_blank", "noopener,noreferrer");
+    window.open(url, "_blank", "noopener,noreferrer");
   }
+
+  const hasSubLinks = destination.subLinks && destination.subLinks.length > 0;
 
   return (
     <section className="arrival-panel">
@@ -26,12 +28,33 @@ export default function ArrivalPanel({
         </button>
       ) : (
         <div className="arrival-actions">
-          <button className="primary-button" onClick={visit}>
-            ENTER {destination.label.toUpperCase()}
-          </button>
-          <button className="secondary-button" onClick={onBack}>
-            NEXT DESTINATION
-          </button>
+          {hasSubLinks ? (
+            <>
+              <div className="arrival-sublinks">
+                {destination.subLinks.map((link) => (
+                  <button
+                    key={link.url}
+                    className="primary-button wide arrival-sublink-btn"
+                    onClick={() => visit(link.url)}
+                  >
+                    {link.label}
+                  </button>
+                ))}
+              </div>
+              <button className="secondary-button wide" onClick={onBack}>
+                NEXT DESTINATION
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="primary-button" onClick={() => visit(destination.url)}>
+                ENTER {destination.label.toUpperCase()}
+              </button>
+              <button className="secondary-button" onClick={onBack}>
+                NEXT DESTINATION
+              </button>
+            </>
+          )}
         </div>
       )}
     </section>
