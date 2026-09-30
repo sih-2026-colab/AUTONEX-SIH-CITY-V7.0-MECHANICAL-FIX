@@ -496,13 +496,8 @@ export default function Experience({
         decision = "SLOWING FOR INTERSECTION";
       }
 
-<<<<<<< HEAD
-      // Destination docking must never interrupt an active pass/return maneuver.
-      const docking = remaining < 14.0;
-=======
       // Destination docking
       const docking = remaining < 14.0 && r.mode !== "OVERTAKE" && r.mode !== "RETURN";
->>>>>>> bf071df (fix(physics): resolve vehicle freeze, optimize HUD re-renders, add Cat Reflex HUD, and update view button layout)
       const finalAlign = remaining < 7.0;
       const maneuverInProgress = r.mode === "OVERTAKE" || r.mode === "RETURN";
       if (docking && !maneuverInProgress && !immediatePathBlocker) {
@@ -513,7 +508,6 @@ export default function Experience({
         decision = finalAlign ? "CENTERING IN RED PARKING BAY" : "ALIGNING WITH DESTINATION BAY";
       }
 
-<<<<<<< HEAD
       if (immediatePathBlocker && !maneuverInProgress && !docking) {
         r.mode = "FOLLOW";
         r.desiredLaneOffset = LANE_OFFSET;
@@ -522,9 +516,7 @@ export default function Experience({
         decision = "PATH BLOCKED — HOLDING SAFE GAP";
       }
 
-=======
       const previousLaneOffset = r.laneOffset;
->>>>>>> bf071df (fix(physics): resolve vehicle freeze, optimize HUD re-renders, add Cat Reflex HUD, and update view button layout)
       r.laneOffset = THREE.MathUtils.damp(
         r.laneOffset,
         r.desiredLaneOffset,
